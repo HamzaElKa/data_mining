@@ -1,11 +1,3 @@
-# src/load_data.py
-# Session 1 (Data Mining project) — robust loader + quick exploration report
-# Dataset columns expected (example):
-# id, user, lat, long, tags, title,
-# date_taken_minute, date_taken_hour, date_taken_day, date_taken_month, date_taken_year,
-# date_upload_minute, date_upload_hour, date_upload_day, date_upload_month, date_upload_year,
-# plus possible trailing empty columns (",,," -> Unnamed: ...)
-
 from __future__ import annotations
 
 import os
@@ -14,10 +6,6 @@ from typing import Dict, Optional, Tuple, List
 
 import pandas as pd
 
-
-# -----------------------------
-# Report object (what you show during the milestone)
-# -----------------------------
 @dataclass(frozen=True)
 class DataReport:
     file_path: str
@@ -45,16 +33,7 @@ class DataReport:
     upload_dt_success_rate: Optional[float]
 
 
-# -----------------------------
-# Path helpers
-# -----------------------------
 def _resolve_path(path: str) -> str:
-    """
-    Resolve a CSV path robustly:
-    - accept absolute path
-    - accept relative path from CWD
-    - accept relative path from src/ directory
-    """
     if os.path.isabs(path) and os.path.exists(path):
         return path
 
@@ -73,25 +52,13 @@ def _resolve_path(path: str) -> str:
     )
 
 
-# -----------------------------
-# Data helpers
-# -----------------------------
 def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Make column names consistent:
-    - strip spaces
-    - lower-case
-    - keep underscores
-    """
     df = df.copy()
     df.columns = [str(c).strip().lower() for c in df.columns]
     return df
 
 
 def _drop_unnamed_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Tuple[str, ...]]:
-    """
-    Drop empty columns caused by trailing commas (",,,") -> "Unnamed: x".
-    """
     unnamed = tuple([c for c in df.columns if str(c).startswith("unnamed:")])
     if unnamed:
         df = df.drop(columns=list(unnamed))
@@ -99,9 +66,6 @@ def _drop_unnamed_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Tuple[str, ..
 
 
 def _pick_lat_lon_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Prefer 'lat' and 'long' as per your schema; support common variants.
-    """
     cols = set(df.columns)
     lat_candidates = ["lat", "latitude"]
     lon_candidates = ["long", "lon", "lng", "longitude"]
@@ -135,12 +99,6 @@ def _gps_stats(df: pd.DataFrame, lat_col: str, lon_col: str) -> Tuple[int, int, 
 
 
 def _build_datetime_from_split_fields(df: pd.DataFrame, prefix: str) -> pd.Series:
-    """
-    Build a datetime from:
-      {prefix}_year, {prefix}_month, {prefix}_day, {prefix}_hour, {prefix}_minute
-    Example prefix: 'date_taken' or 'date_upload'
-    Returns a UTC pandas datetime series with NaT where invalid.
-    """
     required = [f"{prefix}_year", f"{prefix}_month", f"{prefix}_day", f"{prefix}_hour", f"{prefix}_minute"]
     for c in required:
         if c not in df.columns:
@@ -166,12 +124,6 @@ def _success_rate(dt: pd.Series) -> Optional[float]:
 
 
 def _recommend_dtypes(columns: List[str]) -> Dict[str, str]:
-    """
-    Reasonable dtypes to keep memory low (Session 1).
-    - text columns as 'string'
-    - numeric date pieces as 'Int64' nullable
-    - lat/lon as 'float64' (safe)
-    """
     dtypes: Dict[str, str] = {}
     for c in columns:
         if c in ("tags", "title", "user", "id"):
@@ -182,14 +134,9 @@ def _recommend_dtypes(columns: List[str]) -> Dict[str, str]:
         elif c in ("lat", "latitude", "long", "lon", "lng", "longitude"):
             dtypes[c] = "float64"
         else:
-            # fallback: let pandas infer
             pass
     return dtypes
 
-
-# -----------------------------
-# Public API
-# -----------------------------
 def load_data(
     csv_path: str,
     *,
@@ -199,21 +146,9 @@ def load_data(
     drop_unnamed: bool = True,
     normalize_columns: bool = True,
 ) -> Tuple[pd.DataFrame, DataReport]:
-    """
-    Load CSV + compute a quick exploration report required for Session 1.
 
-    Returns:
-      df: raw loaded dataframe (only unnamed cols optionally dropped and columns normalized)
-      report: DataReport with key diagnostics (missing, duplicates, GPS/date sanity)
-
-    Notes:
-    - No "cleaning" here (that is for cleaning.py). This is exploration only.
-    - We DO normalize column names to avoid bugs: 'LAT ' -> 'lat', etc.
-    """
     resolved = _resolve_path(csv_path)
 
-    # Read once with recommended dtypes to improve speed/memory
-    # (We need the header first only if we want dynamic dtypes; easiest: read header with nrows=0)
     header_df = pd.read_csv(resolved, sep=sep, encoding=encoding, nrows=0)
     header_cols = [str(c).strip().lower() for c in header_df.columns]
     dtypes = _recommend_dtypes(header_cols)
@@ -233,20 +168,17 @@ def load_data(
     if drop_unnamed:
         df, dropped_unnamed_cols = _drop_unnamed_columns(df)
 
-    # Core counts
     n_rows, n_cols = df.shape
     columns = tuple(df.columns.tolist())
     missing_by_col = {c: int(df[c].isna().sum()) for c in df.columns}
     duplicate_rows_count = int(df.duplicated().sum())
 
-    # GPS checks
     lat_col, lon_col = _pick_lat_lon_columns(df)
     if lat_col and lon_col:
         gps_missing_rows, gps_invalid_rows, lat_min, lat_max, lon_min, lon_max = _gps_stats(df, lat_col, lon_col)
     else:
         gps_missing_rows, gps_invalid_rows, lat_min, lat_max, lon_min, lon_max = 0, 0, None, None, None, None
 
-    # Date checks (build from split fields)
     taken_dt = _build_datetime_from_split_fields(df, "date_taken")
     upload_dt = _build_datetime_from_split_fields(df, "date_upload")
     taken_rate = _success_rate(taken_dt)
@@ -332,13 +264,8 @@ def print_report(report: DataReport, top_missing: int = 12) -> None:
     print("=" * 92 + "\n")
 
 
-# -----------------------------
-# Local test
-# -----------------------------
 if __name__ == "__main__":
-    # If you run from project root:
-    #   python src/load_data.py
-    # it will look for ../data/flickr_data.csv relative to src/.
+
     try:
         df_, rep_ = load_data("../data/flickr_data2.csv")
         print_report(rep_)
