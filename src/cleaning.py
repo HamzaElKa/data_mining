@@ -1,29 +1,9 @@
-# src/cleaning.py
-# Session 1 — Cleaning pipeline following the required steps:
-# 1) Normalisation du schéma et des types
-# 2) Nettoyage géographique (bbox Grand Lyon, validation GPS, NO coord dedup by default)
-# 3) Nettoyage temporel (parsing dates, validation, extraction features)
-# 4) Nettoyage textuel (normalisation tags/titles)
-# 5) Suppression des doublons (by photo id, then exact duplicates)
-#
-# IMPORTANT (based on your test):
-# - We DO NOT remove "duplicate coordinates" by default because it can destroy the dataset
-#   (many different photos can share the same lat/lon).
-# - We use a wider "Grand Lyon" bbox to avoid dropping too many valid points.
-
 from __future__ import annotations
-
 import re
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, List
-
 import pandas as pd
 
-
-# -----------------------------
-# Config (Grand Lyon bounding box)
-# -----------------------------
-# Wider bbox to cover Lyon + close surroundings.
 GRAND_LYON_BBOX = {
     "lat_min": 45.60,
     "lat_max": 45.90,
@@ -31,90 +11,53 @@ GRAND_LYON_BBOX = {
     "lon_max": 5.05,
 }
 
-
-# -----------------------------
-# Report
-# -----------------------------
 @dataclass(frozen=True)
 class CleaningReport:
     n_rows_before: int
     n_rows_after: int
-
-    # Step 1
     dropped_unnamed_columns: Tuple[str, ...]
     renamed_columns: Dict[str, str]
     coerced_numeric_cells: Dict[str, int]
-
-    # Step 2
     removed_missing_gps_rows: int
     removed_invalid_gps_rows: int
     removed_outside_bbox_rows: int
-    removed_duplicate_coords_rows: int  # will be 0 by default (coord dedup off)
-
-    # Step 3
+    removed_duplicate_coords_rows: int  
     taken_dt_success_rate: Optional[float]
     upload_dt_success_rate: Optional[float]
-    removed_invalid_time_rows: int  # only if strict_time_validation=True
-
-    # Step 4
+    removed_invalid_time_rows: int  
     filled_missing_tags: int
     filled_missing_title: int
-
-    # Step 5
     removed_duplicates_by_id: int
     removed_exact_row_duplicates: int
-
     dedup_strategy: str
 
-
-# -----------------------------
-# Utilities
-# -----------------------------
 def _drop_unnamed_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Tuple[str, ...]]:
     unnamed = tuple([c for c in df.columns if str(c).lower().startswith("unnamed:")])
     if unnamed:
         df = df.drop(columns=list(unnamed))
     return df, unnamed
 
-
 def _normalize_column_names(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
-    """
-    Lowercase + strip. Also normalize common variants:
-    - longitude -> long
-    - latitude  -> lat
-    - photo_id/id_photo -> id
-    - owner/id_photographe -> user
-    Returns (df, rename_map_applied).
-    """
     df = df.copy()
     original_cols = list(df.columns)
     normalized_cols = [str(c).strip().lower() for c in original_cols]
     df.columns = normalized_cols
-
     rename_map: Dict[str, str] = {}
-
-    # Normalize longitude naming to "long"
     if "long" not in df.columns:
         for alt in ("lon", "lng", "longitude"):
             if alt in df.columns:
                 df = df.rename(columns={alt: "long"})
                 rename_map[alt] = "long"
                 break
-
-    # Normalize latitude naming to "lat"
     if "lat" not in df.columns and "latitude" in df.columns:
         df = df.rename(columns={"latitude": "lat"})
         rename_map["latitude"] = "lat"
-
-    # Normalize id naming
     if "id" not in df.columns:
         for alt in ("photo_id", "id_photo"):
             if alt in df.columns:
                 df = df.rename(columns={alt: "id"})
                 rename_map[alt] = "id"
                 break
-
-    # Normalize user naming
     if "user" not in df.columns:
         for alt in ("owner", "photographer", "id_photographe"):
             if alt in df.columns:
@@ -124,16 +67,10 @@ def _normalize_column_names(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, s
 
     return df, rename_map
 
-
 def _to_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
-
 def _coerce_numeric_columns(df: pd.DataFrame, cols: List[str]) -> Tuple[pd.DataFrame, Dict[str, int]]:
-    """
-    Convert given columns to numeric with coercion.
-    Returns counts of cells that became NaN due to coercion (approx).
-    """
     df = df.copy()
     coerced_counts: Dict[str, int] = {}
 
@@ -146,7 +83,6 @@ def _coerce_numeric_columns(df: pd.DataFrame, cols: List[str]) -> Tuple[pd.DataF
         coerced_counts[c] = max(0, before_nonnull - after_nonnull)
 
     return df, coerced_counts
-
 
 def _build_datetime(df: pd.DataFrame, prefix: str) -> pd.Series:
     required = [f"{prefix}_year", f"{prefix}_month", f"{prefix}_day", f"{prefix}_hour", f"{prefix}_minute"]
@@ -165,12 +101,10 @@ def _build_datetime(df: pd.DataFrame, prefix: str) -> pd.Series:
     )
     return pd.to_datetime(dt_df, errors="coerce", utc=True)
 
-
 def _success_rate(dt: pd.Series) -> Optional[float]:
     if len(dt) == 0:
         return None
     return float(dt.notna().sum() / len(dt))
-
 
 def _bbox_mask(df: pd.DataFrame, lat_col: str, lon_col: str, bbox: Dict[str, float]) -> pd.Series:
     return (
@@ -180,22 +114,12 @@ def _bbox_mask(df: pd.DataFrame, lat_col: str, lon_col: str, bbox: Dict[str, flo
         & (df[lon_col] <= bbox["lon_max"])
     )
 
-
 def _clean_text_basic(s: pd.Series) -> pd.Series:
     s = s.fillna("").astype("string")
     s = s.str.replace(r"\s+", " ", regex=True).str.strip().str.lower()
     return s
 
-
 def _normalize_tags(s: pd.Series) -> pd.Series:
-    """
-    Flickr tags are usually space-separated.
-    We'll:
-    - lowercase/strip
-    - replace commas/semicolons with spaces
-    - keep tokens [a-z0-9_-@]
-    - deduplicate tokens per row (keeps order)
-    """
     s = _clean_text_basic(s)
     s = s.str.replace(",", " ").str.replace(";", " ").str.replace("|", " ")
 
@@ -213,12 +137,7 @@ def _normalize_tags(s: pd.Series) -> pd.Series:
 
     return s.apply(normalize_row_tags).astype("string")
 
-
 def _remove_duplicate_coords(df: pd.DataFrame, lat_col: str, lon_col: str, precision: int = 5) -> Tuple[pd.DataFrame, int]:
-    """
-    OPTIONAL. Removes duplicate coordinates after rounding.
-    Disabled by default because it can remove many legitimate photos from popular places.
-    """
     tmp = df.copy()
     tmp["_lat_r"] = tmp[lat_col].round(precision)
     tmp["_lon_r"] = tmp[lon_col].round(precision)
@@ -232,10 +151,6 @@ def _remove_duplicate_coords(df: pd.DataFrame, lat_col: str, lon_col: str, preci
 
 
 def _deduplicate_by_id_keep_best_text(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
-    """
-    Deduplicate by photo id (best option).
-    Keep the row with most textual info (tags+title length).
-    """
     if "id" not in df.columns:
         return df, 0
 
@@ -252,33 +167,18 @@ def _deduplicate_by_id_keep_best_text(df: pd.DataFrame) -> Tuple[pd.DataFrame, i
     tmp = tmp.drop(columns=["_keep_score"])
     return tmp, int(removed)
 
-
-# -----------------------------
-# Main cleaning pipeline
-# -----------------------------
 def clean_data(
     df: pd.DataFrame,
     *,
     bbox: Dict[str, float] = GRAND_LYON_BBOX,
     lat_col: str = "lat",
     lon_col: str = "long",
-    drop_duplicate_coords: bool = False,   # IMPORTANT: OFF by default
+    drop_duplicate_coords: bool = False,   
     coords_precision: int = 5,
-    strict_time_validation: bool = False,  # OFF by default for Session 1
+    strict_time_validation: bool = False,  
 ) -> Tuple[pd.DataFrame, CleaningReport]:
-    """
-    Full cleaning pipeline following the required steps.
-
-    strict_time_validation:
-      - False (recommended for Session 1): keep rows even if datetime is NaT, but measure success rate.
-      - True: drop rows where both taken_dt and upload_dt are invalid.
-    """
     n_before = int(len(df))
     work = df.copy()
-
-    # ---------------------------------------------------------
-    # 1) Normalisation du schéma et des types
-    # ---------------------------------------------------------
     work, dropped_unnamed = _drop_unnamed_columns(work)
     work, rename_map = _normalize_column_names(work)
 
@@ -293,37 +193,26 @@ def clean_data(
         if c in work.columns:
             work[c] = work[c].astype("string")
 
-    # ---------------------------------------------------------
-    # 2) Nettoyage géographique (bbox, validation GPS, (optional) coord dedup)
-    # ---------------------------------------------------------
     removed_missing_gps = 0
     removed_invalid_gps = 0
     removed_outside_bbox = 0
     removed_dup_coords = 0
 
     if lat_col in work.columns and lon_col in work.columns:
-        # Missing GPS
         missing_mask = work[lat_col].isna() | work[lon_col].isna()
         removed_missing_gps = int(missing_mask.sum())
         work = work.loc[~missing_mask].copy()
-
-        # Invalid GPS (Earth bounds)
         invalid_mask = (work[lat_col] < -90) | (work[lat_col] > 90) | (work[lon_col] < -180) | (work[lon_col] > 180)
         removed_invalid_gps = int(invalid_mask.sum())
         work = work.loc[~invalid_mask].copy()
 
-        # Grand Lyon bbox
         bbox_mask = _bbox_mask(work, lat_col, lon_col, bbox)
         removed_outside_bbox = int((~bbox_mask).sum())
         work = work.loc[bbox_mask].copy()
 
-        # Optional coordinate dedup
         if drop_duplicate_coords:
             work, removed_dup_coords = _remove_duplicate_coords(work, lat_col, lon_col, precision=coords_precision)
 
-    # ---------------------------------------------------------
-    # 3) Nettoyage temporel (parsing dates, validation, extraction features)
-    # ---------------------------------------------------------
     taken_dt = _build_datetime(work, "date_taken")
     upload_dt = _build_datetime(work, "date_upload")
     taken_rate = _success_rate(taken_dt)
@@ -338,16 +227,12 @@ def clean_data(
         removed_invalid_time_rows = int(invalid_time_mask.sum())
         work = work.loc[~invalid_time_mask].copy()
 
-    # Extract basic time features from taken_dt (fallback to upload_dt)
     dt_ref = work["taken_dt"].fillna(work["upload_dt"])
     work["year"] = dt_ref.dt.year.astype("Int64")
     work["month"] = dt_ref.dt.month.astype("Int64")
     work["day"] = dt_ref.dt.day.astype("Int64")
     work["hour"] = dt_ref.dt.hour.astype("Int64")
 
-    # ---------------------------------------------------------
-    # 4) Nettoyage textuel (normalisation tags/titles)
-    # ---------------------------------------------------------
     filled_missing_tags = 0
     filled_missing_title = 0
 
@@ -359,7 +244,6 @@ def clean_data(
         filled_missing_title = int(work["title"].isna().sum())
         work["title"] = _clean_text_basic(work["title"])
 
-    # Combined text field for later text-mining (safe now)
     if "tags" in work.columns and "title" in work.columns:
         work["text"] = (work["title"].fillna("") + " " + work["tags"].fillna("")).str.strip()
     elif "title" in work.columns:
@@ -369,26 +253,20 @@ def clean_data(
     else:
         work["text"] = ""
 
-    # ---------------------------------------------------------
-    # 5) Suppression des doublons
-    # ---------------------------------------------------------
     removed_by_id = 0
     removed_exact = 0
     dedup_strategy = "none"
 
-    # 5a) Dedup by photo id
     if "id" in work.columns:
         before = len(work)
         work, removed_by_id = _deduplicate_by_id_keep_best_text(work)
         removed_by_id = int(before - len(work))
         dedup_strategy = "by_photo_id_keep_best_text"
 
-    # 5b) Exact row duplicates
     before2 = len(work)
     work = work.drop_duplicates()
     removed_exact = int(before2 - len(work))
 
-    # Final index reset
     work = work.reset_index(drop=True)
     n_after = int(len(work))
 
@@ -470,17 +348,14 @@ def print_cleaning_report(rep: CleaningReport) -> None:
 
     print("=" * 92 + "\n")
 
-
 if __name__ == "__main__":
-    # Local test: requires src/load_data.py next to this file.
-    # Run from project root: python src/cleaning.py
     try:
         from load_data import load_data, print_report
 
         df_raw, rep_raw = load_data("../data/flickr_data2.csv")
         print_report(rep_raw)
 
-        df_clean, rep_clean = clean_data(df_raw)  # defaults tuned to keep ~160k-190k lines
+        df_clean, rep_clean = clean_data(df_raw)  
         print_cleaning_report(rep_clean)
 
         print("Clean Head(3):")
