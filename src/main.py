@@ -1,0 +1,84 @@
+# src/main.py
+# End-to-end Session 1 pipeline:
+# load_data -> cleaning -> visualization (map) -> clustering (DBSCAN) -> cluster map + CSV
+
+from __future__ import annotations
+
+import os
+
+from load_data import load_data, print_report
+from cleaning import clean_data, print_cleaning_report
+from visualization import create_map, MapConfig
+from clustering import (
+    run_dbscan_geo,
+    print_cluster_report,
+    save_clustered_csv,
+    make_cluster_map,
+)
+
+
+def main() -> None:
+    # ---- Paths (run from project root) ----
+    csv_path = "../data/flickr_data2.csv"
+
+    # ---- 1) Load + explore ----
+    df_raw, rep_raw = load_data(csv_path)
+    print_report(rep_raw)
+
+    # ---- 2) Clean ----
+    df_clean, rep_clean = clean_data(df_raw)
+    print_cleaning_report(rep_clean)
+
+    # ---- 3) Map (sampled) ----
+    os.makedirs("outputs", exist_ok=True)
+    map_cfg = MapConfig(
+        output_html="outputs/map_session1.html",
+        sample_n=15000,
+        random_state=42,
+        center=(45.7640, 4.8357),
+        zoom_start=12,
+        max_markers=15000,
+    )
+    out_map = create_map(df_clean, cfg=map_cfg)
+    print(f"[OK] Session 1 map saved to: {out_map}")
+
+    # ---- 4) Clustering ----
+    # Tune these two hyperparams during Session 1:
+    eps_meters = 120.0
+    min_samples = 30
+
+    df_clustered, rep_cluster = run_dbscan_geo(
+        df_clean,
+        eps_meters=eps_meters,
+        min_samples=min_samples,
+        cluster_col="cluster",
+    )
+    print_cluster_report(rep_cluster)
+
+    # ---- 5) Save clustered data ----
+    out_csv = save_clustered_csv(df_clustered, "outputs/clustered.csv")
+    print(f"[OK] Clustered CSV saved to: {out_csv}")
+
+    # ---- 6) Optional: clusters map (requires folium) ----
+    try:
+        out_cluster_map = make_cluster_map(
+            df_clustered,
+            output_html="outputs/map_clusters.html",
+            sample_n=25000,
+            random_state=42,
+            center=(45.7640, 4.8357),
+            zoom_start=12,
+        )
+        print(f"[OK] Cluster map saved to: {out_cluster_map}")
+    except Exception as e:
+        print(f"[WARN] Cluster map not generated (folium missing or error): {e}")
+
+    print("\n✅ Pipeline finished.")
+    print("Open these files:")
+    print("- outputs/map_session1.html")
+    print("- outputs/map_clusters.html (if generated)")
+    print("- outputs/clustered.csv")
+
+
+if __name__ == "__main__":
+    main()
