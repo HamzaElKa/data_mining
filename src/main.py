@@ -18,8 +18,8 @@ from clustering import (
 
 
 def main() -> None:
-    # ---- Paths (run from project root) ----
-    csv_path = "../data/flickr_data2.csv"
+    # ---- Paths (run from project root or src/) ----
+    csv_path = "../flickr_data2.csv"  # Fichier à la racine du projet
 
     # ---- 1) Load + explore ----
     df_raw, rep_raw = load_data(csv_path)
@@ -44,14 +44,20 @@ def main() -> None:
 
     # ---- 4) Clustering ----
     # Tune these two hyperparams during Session 1:
-    eps_meters = 120.0
-    min_samples = 30
+    # IMPORTANT: Avec déduplication GPS activée par défaut pour éviter sur-représentation
+    # eps_meters: rayon de voisinage (50-200m typique pour POI urbains)
+    # min_samples: photos minimum pour former cluster (plus élevé = clusters plus denses)
+    
+    eps_meters = 50.0  # 50m = bon compromis pour POI distincts
+    min_samples = 50   # 50 photos minimum = POI significatifs
 
     df_clustered, rep_cluster = run_dbscan_geo(
         df_clean,
         eps_meters=eps_meters,
         min_samples=min_samples,
         cluster_col="cluster",
+        deduplicate_coords=True,  # CRUCIAL: évite méga-clusters
+        coord_precision=4,  # 4 décimales = ~11m de précision
     )
     print_cluster_report(rep_cluster)
 

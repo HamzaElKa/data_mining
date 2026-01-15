@@ -58,6 +58,8 @@ def run_dbscan_geo(
     eps_meters: float = 120.0,
     min_samples: int = 30,
     cluster_col: str = "cluster",
+    deduplicate_coords: bool = True,
+    coord_precision: int = 4,
 ) -> Tuple[pd.DataFrame, ClusterReport]:
     """
     Run DBSCAN with haversine distance on (lat,lon).
@@ -70,6 +72,14 @@ def run_dbscan_geo(
       min number of points within eps to form a cluster.
       If too high -> fewer clusters and more noise.
       If too low -> too many tiny clusters.
+      
+    deduplicate_coords:
+      If True, keep only 1 photo per unique GPS coordinate (rounded to coord_precision).
+      This prevents over-representation of heavily photographed exact spots.
+      Recommended: True for balanced clustering.
+      
+    coord_precision:
+      Number of decimal places for coordinate rounding (4 = ~11m precision).
     """
     _require_columns(df_clean, [lat_col, lon_col])
 
@@ -83,9 +93,20 @@ def run_dbscan_geo(
     df = df.dropna(subset=[lat_col, lon_col]).copy()
 
     n_rows_in = int(len(df_clean))
-    n_rows_used = int(len(df))
+    
+    # Optional: deduplicate coordinates to prevent over-representation
+    if deduplicate_coords:
+        # Round coords and keep first occurrence per unique coordinate
+        df['_lat_round'] = df[lat_col].round(coord_precision)
+        df['_lon_round'] = df[lon_col].round(coord_precision)
+        df_sample = df.drop_duplicates(subset=['_lat_round', '_lon_round'], keep='first').copy()
+        df_sample = df_sample.drop(columns=['_lat_round', '_lon_round'])
+    else:
+        df_sample = df.copy()
+    
+    n_rows_used = int(len(df_sample))
 
-    coords_rad = _to_radians(df[lat_col].to_numpy(), df[lon_col].to_numpy())
+    coords_rad = _to_radians(df_sample[lat_col].to_numpy(), df_sample[lon_col].to_numpy())
 
     eps_rad = _eps_meters_to_radians(eps_meters)
 
@@ -98,7 +119,28 @@ def run_dbscan_geo(
     )
 
     labels = model.fit_predict(coords_rad)
-    df[cluster_col] = labels.astype(int)
+    
+    # Assign cluster labels back to df_sample
+    df_sample[cluster_col] = labels.astype(int)
+    
+    # If we deduplicated, we need to propagate labels back to original df
+    if deduplicate_coords:
+        # Create mapping from rounded coords to cluster labels
+        df_sample['_lat_round'] = df_sample[lat_col].round(coord_precision)
+        df_sample['_lon_round'] = df_sample[lon_col].round(coord_precision)
+        
+        # Map original df
+        df['_lat_round'] = df[lat_col].round(coord_precision)
+        df['_lon_round'] = df[lon_col].round(coord_precision)
+        
+        # Merge labels
+        coord_to_cluster = df_sample[['_lat_round', '_lon_round', cluster_col]].drop_duplicates()
+        df = df.drop(columns=[cluster_col], errors='ignore')
+        df = df.merge(coord_to_cluster, on=['_lat_round', '_lon_round'], how='left')
+        df[cluster_col] = df[cluster_col].fillna(-1).astype(int)
+        df = df.drop(columns=['_lat_round', '_lon_round'])
+    else:
+        df = df_sample
 
     # Report
     noise_points = int((labels == -1).sum())
