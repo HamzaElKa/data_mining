@@ -1,0 +1,2 @@
+/Users/by/data_mining/src/load_data.py:156: DtypeWarning: Columns (11,12) have mixed types. Specify dtype option on import or set low_memory=False.
+  df = pd.read_csv(

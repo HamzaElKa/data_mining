@@ -224,6 +224,9 @@ def make_cluster_map(
     df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
     df = df.dropna(subset=[lat_col, lon_col]).copy()
 
+    # Exclure le bruit (cluster = -1) de la visualisation
+    df = df[df[cluster_col] != -1].copy()
+
     if sample_n > 0 and len(df) > sample_n:
         df = df.sample(n=sample_n, random_state=random_state)
 
@@ -290,3 +293,255 @@ if __name__ == "__main__":
 
     except Exception as e:
         print(f"[ERROR] {e}")
+
+
+# ============================================================================
+# SESSION 2: K-MEANS CLUSTERING
+# ============================================================================
+
+def _gps_to_cartesian(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+    """
+    Convert GPS (lat, lon) to approximate Cartesian (X, Y) in km.
+    Uses simple equirectangular projection centered on Lyon.
+    Good enough for local area (~50km radius).
+    """
+    # Lyon center as reference
+    lat_center = 45.7640
+    lon_center = 4.8357
+    
+    # Earth radius in km
+    R = 6371.0
+    
+    # Convert to radians
+    lat_rad = np.radians(lat)
+    lon_rad = np.radians(lon)
+    lat_center_rad = np.radians(lat_center)
+    lon_center_rad = np.radians(lon_center)
+    
+    # Approximate cartesian coordinates in km
+    X = R * (lon_rad - lon_center_rad) * np.cos(lat_center_rad)
+    Y = R * (lat_rad - lat_center_rad)
+    
+    return np.column_stack([X, Y])
+
+
+def run_kmeans(
+    df_clean: pd.DataFrame,
+    *,
+    lat_col: str = "lat",
+    lon_col: str = "long",
+    n_clusters: int = 50,
+    cluster_col: str = "cluster",
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Run K-Means clustering on GPS coordinates.
+    
+    Parameters:
+    -----------
+    n_clusters : int
+        Number of clusters (must be chosen a priori).
+        Typical values for Lyon: 30-70.
+    
+    Returns:
+    --------
+    df_clustered : DataFrame with new column 'cluster'
+    report : dict with metrics (inertia, silhouette, etc.)
+    """
+    _require_columns(df_clean, [lat_col, lon_col])
+    
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score, davies_bouldin_score
+    
+    df = df_clean.copy()
+    
+    # Ensure numeric coords
+    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+    df = df.dropna(subset=[lat_col, lon_col]).copy()
+    
+    n_rows = int(len(df))
+    
+    # Convert GPS to Cartesian (km)
+    X = _gps_to_cartesian(df[lat_col].to_numpy(), df[lon_col].to_numpy())
+    
+    # Run K-Means
+    model = KMeans(
+        n_clusters=n_clusters,
+        random_state=random_state,
+        n_init=10,
+        max_iter=300,
+    )
+    
+    labels = model.fit_predict(X)
+    df[cluster_col] = labels.astype(int)
+    
+    # Calculate metrics
+    inertia = float(model.inertia_)
+    silhouette = float(silhouette_score(X, labels))
+    davies_bouldin = float(davies_bouldin_score(X, labels))
+    
+    # Cluster sizes
+    cluster_sizes = df[cluster_col].value_counts().sort_values(ascending=False)
+    cluster_sizes_top10 = [(int(cid), int(size)) for cid, size in cluster_sizes.head(10).items()]
+    
+    report = {
+        "algorithm": "K-Means",
+        "n_rows": n_rows,
+        "n_clusters": n_clusters,
+        "inertia": inertia,
+        "silhouette_score": silhouette,
+        "davies_bouldin_index": davies_bouldin,
+        "cluster_sizes_top10": cluster_sizes_top10,
+    }
+    
+    return df, report
+
+
+def find_optimal_k(
+    df_clean: pd.DataFrame,
+    *,
+    lat_col: str = "lat",
+    lon_col: str = "long",
+    k_range: range = range(20, 81, 10),
+    random_state: int = 42,
+) -> Tuple[List[int], List[float], List[float]]:
+    """
+    Test multiple K values and return metrics for elbow/silhouette analysis.
+    
+    Returns:
+    --------
+    k_values : list of int
+    inertias : list of float (for elbow plot)
+    silhouettes : list of float (for silhouette plot)
+    """
+    _require_columns(df_clean, [lat_col, lon_col])
+    
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+    
+    df = df_clean.copy()
+    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+    df = df.dropna(subset=[lat_col, lon_col]).copy()
+    
+    X = _gps_to_cartesian(df[lat_col].to_numpy(), df[lon_col].to_numpy())
+    
+    k_values = []
+    inertias = []
+    silhouettes = []
+    
+    for k in k_range:
+        print(f"Testing K-Means with K={k}...")
+        model = KMeans(n_clusters=k, random_state=random_state, n_init=10, max_iter=300)
+        labels = model.fit_predict(X)
+        
+        k_values.append(k)
+        inertias.append(float(model.inertia_))
+        silhouettes.append(float(silhouette_score(X, labels)))
+    
+    return k_values, inertias, silhouettes
+
+
+# ============================================================================
+# SESSION 2: HDBSCAN CLUSTERING
+# ============================================================================
+
+def run_hdbscan(
+    df_clean: pd.DataFrame,
+    *,
+    lat_col: str = "lat",
+    lon_col: str = "long",
+    min_cluster_size: int = 50,
+    min_samples: int = 50,
+    cluster_col: str = "cluster",
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Run HDBSCAN clustering on GPS coordinates.
+    
+    HDBSCAN advantages over DBSCAN:
+    - Handles varying density (Bellecour dense vs Terreaux less dense)
+    - Hierarchical structure
+    - More robust to parameter choice
+    
+    Parameters:
+    -----------
+    min_cluster_size : int
+        Minimum number of points to form a cluster.
+        Similar to min_samples in DBSCAN but more stable.
+        
+    min_samples : int
+        How conservative the clustering is.
+        Higher = more points labeled as noise.
+    
+    Returns:
+    --------
+    df_clustered : DataFrame with new column 'cluster'
+    report : dict with metrics
+    """
+    _require_columns(df_clean, [lat_col, lon_col])
+    
+    try:
+        import hdbscan
+    except ImportError:
+        raise ImportError("hdbscan not installed. Run: pip install hdbscan")
+    
+    from sklearn.metrics import silhouette_score, davies_bouldin_score
+    
+    df = df_clean.copy()
+    
+    # Ensure numeric coords
+    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+    df = df.dropna(subset=[lat_col, lon_col]).copy()
+    
+    n_rows = int(len(df))
+    
+    # Convert to radians for haversine
+    coords_rad = _to_radians(df[lat_col].to_numpy(), df[lon_col].to_numpy())
+    
+    # Run HDBSCAN
+    model = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        metric="haversine",
+        core_dist_n_jobs=-1,
+    )
+    
+    labels = model.fit_predict(coords_rad)
+    df[cluster_col] = labels.astype(int)
+    
+    # Calculate metrics
+    noise_points = int((labels == -1).sum())
+    noise_ratio = float(noise_points / len(labels)) if len(labels) else 0.0
+    
+    cluster_ids = [cid for cid in set(labels.tolist()) if cid != -1]
+    n_clusters = len(cluster_ids)
+    
+    # Cluster sizes
+    cluster_sizes = df[df[cluster_col] != -1][cluster_col].value_counts().sort_values(ascending=False)
+    cluster_sizes_top10 = [(int(cid), int(size)) for cid, size in cluster_sizes.head(10).items()]
+    
+    # Metrics (exclude noise for silhouette/DB)
+    mask_no_noise = labels != -1
+    if mask_no_noise.sum() > 1 and n_clusters > 1:
+        X_no_noise = coords_rad[mask_no_noise]
+        labels_no_noise = labels[mask_no_noise]
+        silhouette = float(silhouette_score(X_no_noise, labels_no_noise, metric='haversine'))
+        davies_bouldin = float(davies_bouldin_score(X_no_noise, labels_no_noise))
+    else:
+        silhouette = None
+        davies_bouldin = None
+    
+    report = {
+        "algorithm": "HDBSCAN",
+        "n_rows": n_rows,
+        "n_clusters": n_clusters,
+        "noise_points": noise_points,
+        "noise_ratio": noise_ratio,
+        "silhouette_score": silhouette,
+        "davies_bouldin_index": davies_bouldin,
+        "cluster_sizes_top10": cluster_sizes_top10,
+    }
+    
+    return df, report
