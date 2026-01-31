@@ -209,6 +209,7 @@ def make_cluster_map(
     random_state: int = 42,
     center: Tuple[float, float] = (45.7640, 4.8357),
     zoom_start: int = 12,
+    cluster_names: Optional[Dict[int, str]] = None,  # NEW: {cluster_id: poi_name}
 ) -> str:
     """
     Optional: build a Folium map where each point is colored by cluster id.
@@ -247,6 +248,13 @@ def make_cluster_map(
 
     for _, row in df.iterrows():
         cid = int(row[cluster_col])
+        
+        # Popup with POI name if available
+        if cluster_names and cid in cluster_names:
+            popup_text = f"<b>{cluster_names[cid]}</b><br>Cluster {cid}"
+        else:
+            popup_text = f"Cluster {cid}"
+        
         folium.CircleMarker(
             location=(float(row[lat_col]), float(row[lon_col])),
             radius=2.5,
@@ -255,7 +263,7 @@ def make_cluster_map(
             fill_color=color_for_cluster(cid),
             fill_opacity=0.7,
             opacity=0.7,
-            popup=f"cluster={cid}",
+            popup=popup_text,
         ).add_to(m)
 
     os.makedirs(os.path.dirname(output_html), exist_ok=True)
@@ -394,6 +402,137 @@ def run_kmeans(
         "davies_bouldin_index": davies_bouldin,
         "cluster_sizes_top10": cluster_sizes_top10,
     }
+    
+    return df, report
+
+
+# ============================================================================
+# SESSION 2: HIERARCHICAL CLUSTERING (AGGLOMERATIVE)
+# ============================================================================
+
+def run_hierarchical(
+    df_clean: pd.DataFrame,
+    *,
+    lat_col: str = "lat",
+    lon_col: str = "long",
+    n_clusters: int = 50,
+    linkage: str = "complete",
+    cluster_col: str = "cluster",
+    random_state: int = 42,
+    max_samples: int = 10000,  # Limit for memory management
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Run Agglomerative Hierarchical Clustering on GPS coordinates.
+    
+    ⚠️ WARNING: Hierarchical clustering requires O(n²) memory.
+    For large datasets (>10k points), we sample first, then predict labels for all points.
+    
+    Parameters:
+    -----------
+    n_clusters : int
+        Number of clusters (must be chosen a priori).
+        Typical values for Lyon: 30-70.
+    linkage : str
+        Linkage method: 'complete', 'average', 'single', 'ward'
+        - complete: maximum distance between clusters (good for well-separated clusters)
+        - average: average distance (compromise)
+        - single: minimum distance (can create chains)
+        - ward: minimizes within-cluster variance (requires euclidean)
+    max_samples : int
+        Maximum number of samples to use for clustering (memory limit).
+        If df has more rows, we sample first, cluster, then predict for all.
+    
+    Returns:
+    --------
+    df_clustered : DataFrame with new column 'cluster'
+    report : dict with metrics (silhouette, etc.)
+    """
+    from sklearn.cluster import AgglomerativeClustering
+    from sklearn.metrics import silhouette_score, davies_bouldin_score, pairwise_distances_argmin_min
+    
+    _require_columns(df_clean, [lat_col, lon_col])
+    
+    df = df_clean.copy()
+    
+    # Ensure numeric coords
+    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+    df = df.dropna(subset=[lat_col, lon_col]).copy()
+    
+    n_rows = int(len(df))
+    print(f"[Hierarchical] Dataset: {n_rows:,} points")
+    
+    # Convert to Cartesian coordinates (km)
+    X_all = _gps_to_cartesian(df[lat_col].to_numpy(), df[lon_col].to_numpy())
+    
+    # If dataset too large, sample first
+    if n_rows > max_samples:
+        print(f"[Hierarchical] Sampling {max_samples:,} points for clustering (memory constraint)...")
+        df_sample = df.sample(n=max_samples, random_state=random_state)
+        X_sample = _gps_to_cartesian(df_sample[lat_col].to_numpy(), df_sample[lon_col].to_numpy())
+        
+        # Cluster on sample
+        model = AgglomerativeClustering(
+            n_clusters=n_clusters,
+            metric='euclidean',
+            linkage=linkage,
+        )
+        labels_sample = model.fit_predict(X_sample)
+        
+        # Assign all points to nearest cluster center
+        # Compute cluster centers from sample
+        cluster_centers = np.array([
+            X_sample[labels_sample == i].mean(axis=0)
+            for i in range(n_clusters)
+        ])
+        
+        # Assign all points to nearest center
+        closest, _ = pairwise_distances_argmin_min(X_all, cluster_centers)
+        labels = closest
+        
+        print(f"[Hierarchical] Assigned all {n_rows:,} points to {n_clusters} clusters (based on sample)")
+    else:
+        # Small dataset: cluster directly
+        print(f"[Hierarchical] Clustering all {n_rows:,} points...")
+        model = AgglomerativeClustering(
+            n_clusters=n_clusters,
+            metric='euclidean',
+            linkage=linkage,
+        )
+        labels = model.fit_predict(X_all)
+    
+    df[cluster_col] = labels.astype(int)
+    
+    # Calculate metrics
+    n_clusters_found = len(set(labels))
+    
+    # Cluster sizes
+    cluster_sizes = df[cluster_col].value_counts().sort_values(ascending=False)
+    cluster_sizes_top10 = [(int(cid), int(size)) for cid, size in cluster_sizes.head(10).items()]
+    
+    # Metrics (on sample if too large)
+    if n_rows > max_samples:
+        X_metric = X_sample
+        labels_metric = labels_sample
+    else:
+        X_metric = X_all
+        labels_metric = labels
+    
+    silhouette = float(silhouette_score(X_metric, labels_metric))
+    davies_bouldin = float(davies_bouldin_score(X_metric, labels_metric))
+    
+    report = {
+        "algorithm": f"Hierarchical ({linkage})",
+        "n_rows": n_rows,
+        "n_clusters": n_clusters_found,
+        "noise_points": 0,  # Hierarchical doesn't have noise
+        "noise_ratio": 0.0,
+        "silhouette_score": silhouette,
+        "davies_bouldin_index": davies_bouldin,
+        "cluster_sizes_top10": cluster_sizes_top10,
+    }
+    
+    print(f"[Hierarchical] Clusters: {n_clusters_found}, Silhouette: {silhouette:.3f}, DB: {davies_bouldin:.3f}")
     
     return df, report
 

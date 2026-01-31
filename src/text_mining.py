@@ -18,6 +18,7 @@ class ClusterDescription:
     top_keywords: List[str]
     tfidf_scores: List[float]
     description: str
+    cluster_title: str  # NEW: Auto-generated POI name
 
 
 def preprocess_text(
@@ -32,13 +33,19 @@ def preprocess_text(
     
     Steps:
     1. Concatenate tags + title
-    2. Lowercase
-    3. Basic cleaning (remove special chars)
+    2. Remove URLs, emails, hashtags
+    3. Unidecode (é → e, ç → c) for accent normalization
+    4. Lowercase
+    5. Remove spam patterns (camera models, websites, social media)
+    6. Remove special characters
+    7. Remove multiple spaces
     
     Returns:
     --------
-    df with new column 'text' (preprocessed)
+    df with new column 'text' (preprocessed and cleaned)
     """
+    import re
+    
     df = df.copy()
     
     # Ensure tags and title are strings
@@ -55,14 +62,69 @@ def preprocess_text(
     # Concatenate tags + title
     df[text_col] = (df[tags_col] + " " + df[title_col]).str.strip()
     
-    # Lowercase
+    # 1. Remove URLs (http://, https://, www.)
+    df[text_col] = df[text_col].str.replace(
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
+        '', regex=True
+    )
+    df[text_col] = df[text_col].str.replace(r'www\.[^\s]+', '', regex=True)
+    
+    # 2. Remove emails
+    df[text_col] = df[text_col].str.replace(
+        r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
+        '', regex=True
+    )
+    
+    # 3. Remove hashtags (keep the word, remove #)
+    df[text_col] = df[text_col].str.replace(r'#', '', regex=False)
+    
+    # 4. Replace commas in tags with spaces (tags are comma-separated)
+    df[text_col] = df[text_col].str.replace(',', ' ', regex=False)
+    
+    # 5. Unidecode for accent normalization (é→e, ç→c, ü→u)
+    try:
+        from unidecode import unidecode
+        df[text_col] = df[text_col].apply(lambda x: unidecode(x) if x else "")
+    except ImportError:
+        # Fallback: manual replacements for French accents
+        replacements = {
+            'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
+            'à': 'a', 'â': 'a', 'ä': 'a',
+            'ù': 'u', 'û': 'u', 'ü': 'u',
+            'ô': 'o', 'ö': 'o',
+            'î': 'i', 'ï': 'i',
+            'ç': 'c',
+        }
+        for old, new in replacements.items():
+            df[text_col] = df[text_col].str.replace(old, new, regex=False)
+    
+    # 6. Lowercase AFTER unidecode (preserve É → e)
     df[text_col] = df[text_col].str.lower()
     
-    # Replace commas in tags with spaces (tags are comma-separated)
-    df[text_col] = df[text_col].str.replace(",", " ")
+    # 7. Remove spam patterns (camera models, social media handles)
+    spam_patterns = [
+        r'\bnikon\s*d\d{2,4}\b',  # nikon d750, nikon d7100
+        r'\bcanon\s*eos\s*\d+d?\b',  # canon eos 5d, canon eos 70d
+        r'\bsigma\s*\d+mm\b',  # sigma 50mm
+        r'\btamron\s*\d+mm\b',
+        r'\binstagram\b',
+        r'\bfollow\s*me\b',
+        r'\bcheck\s*out\b',
+        r'\blike\s*and\s*subscribe\b',
+        r'\b[a-z]+\.com\b',  # any .com domain
+        r'\b[a-z]+\.fr\b',   # any .fr domain
+    ]
+    for pattern in spam_patterns:
+        df[text_col] = df[text_col].str.replace(pattern, '', regex=True)
     
-    # Remove multiple spaces
+    # 8. Remove special characters (keep only letters, numbers, spaces)
+    df[text_col] = df[text_col].str.replace(r'[^a-z0-9\s]', ' ', regex=True)
+    
+    # 9. Remove multiple spaces
     df[text_col] = df[text_col].str.replace(r'\s+', ' ', regex=True)
+    
+    # 10. Strip leading/trailing spaces
+    df[text_col] = df[text_col].str.strip()
     
     return df
 
@@ -122,6 +184,72 @@ def get_stopwords(languages: List[str] = ["french", "english"]) -> set:
     return stop_words
 
 
+def generate_cluster_title(keywords: List[str], max_words: int = 4) -> str:
+    """
+    Generate a clean POI title from TF-IDF keywords.
+    
+    Rules:
+    1. Take top 1-3 keywords (bigrams prioritized)
+    2. Capitalize first letter of each word
+    3. Remove duplicates
+    4. Max 4 words for readability
+    
+    Examples:
+    ---------
+    ["place bellecour", "statue", "louis"] → "Place Bellecour"
+    ["fourviere", "basilique", "notre dame"] → "Basilique Fourviere"
+    ["vieux lyon", "traboules", "medieval"] → "Vieux Lyon"
+    """
+    if not keywords:
+        return "Unknown POI"
+    
+    # Priority: bigrams (2 words) are better POI names
+    bigrams = [kw for kw in keywords[:5] if ' ' in kw]
+    unigrams = [kw for kw in keywords[:5] if ' ' not in kw]
+    
+    selected = []
+    word_count = 0
+    
+    # 1. Start with best bigram (if exists)
+    if bigrams:
+        best_bigram = bigrams[0]
+        selected.append(best_bigram)
+        word_count += len(best_bigram.split())
+    
+    # 2. Add top unigram if space left
+    if unigrams and word_count < max_words:
+        # Skip if already in bigram
+        for unigram in unigrams:
+            if word_count >= max_words:
+                break
+            # Check if not already present
+            if not any(unigram in sel for sel in selected):
+                selected.append(unigram)
+                word_count += 1
+    
+    # 3. If no bigram, take top 2-3 unigrams
+    if not selected:
+        selected = unigrams[:min(3, max_words)]
+    
+    # 4. Join and capitalize
+    title = ' '.join(selected)
+    
+    # Capitalize first letter of each word
+    title = ' '.join(word.capitalize() for word in title.split())
+    
+    # Special cases for French (de, du, des, le, la, les)
+    title = title.replace(' De ', ' de ')
+    title = title.replace(' Du ', ' du ')
+    title = title.replace(' Des ', ' des ')
+    title = title.replace(' Le ', ' le ')
+    title = title.replace(' La ', ' la ')
+    title = title.replace(' Les ', ' les ')
+    title = title.replace(' Au ', ' au ')
+    title = title.replace(' Et ', ' et ')
+    
+    return title
+
+
 def extract_cluster_descriptions(
     df_clustered: pd.DataFrame,
     *,
@@ -174,7 +302,7 @@ def extract_cluster_descriptions(
         min_df=min_df,
         max_df=max_df,
         ngram_range=(1, 2),  # Include bigrams (e.g., "place bellecour")
-        token_pattern=r'\b[a-zàâäéèêëïîôùûü]{3,}\b',  # Min 3 chars, French accents
+        token_pattern=r'\b[a-z]{3,}\b',  # Min 3 chars, only a-z (unidecode already applied)
     )
     
     try:
@@ -199,9 +327,12 @@ def extract_cluster_descriptions(
         # Count photos in cluster
         n_photos = int((df[cluster_col] == cluster_id).sum())
         
+        # Generate POI title (NEW!)
+        cluster_title = generate_cluster_title(top_keywords, max_words=4)
+        
         # Generate description (use top 3 keywords)
         if top_keywords:
-            description = f"Cluster {cluster_id}: {', '.join(top_keywords[:3])}"
+            description = f"{cluster_title}: {', '.join(top_keywords[:3])}"
         else:
             description = f"Cluster {cluster_id}"
         
@@ -211,6 +342,7 @@ def extract_cluster_descriptions(
             top_keywords=top_keywords,
             tfidf_scores=top_scores,
             description=description,
+            cluster_title=cluster_title,  # NEW!
         ))
     
     return descriptions
@@ -233,8 +365,10 @@ def save_descriptions_csv(
     for desc in descriptions:
         data.append({
             "cluster_id": desc.cluster_id,
+            "poi_name": desc.cluster_title,  # ← TITRE POI !
             "n_photos": desc.n_photos,
             "top_keywords": ", ".join(desc.top_keywords),
+            "tfidf_scores": ", ".join(f"{s:.3f}" for s in desc.tfidf_scores),
             "description": desc.description,
         })
     
