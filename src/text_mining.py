@@ -96,7 +96,6 @@ def get_stopwords(languages: List[str] = ["french", "english"]) -> set:
             stop_words.update(stopwords.words(lang))
         
     except ImportError:
-        print("[WARN] NLTK not installed. Using basic French/English stopwords.")
         # Basic fallback stop words
         stop_words = {
             # French
@@ -120,6 +119,60 @@ def get_stopwords(languages: List[str] = ["french", "english"]) -> set:
     stop_words.update(custom_stop)
     
     return stop_words
+
+
+def extract_keywords_by_frequency(
+    df_clustered: pd.DataFrame,
+    *,
+    cluster_col: str = "cluster",
+    text_col: str = "text",
+    top_n: int = 10,
+) -> Dict[int, List[Tuple[str, int]]]:
+    """
+    ALGORITHM 2: Extract keywords by raw frequency (complement to TF-IDF).
+    
+    Simpler than TF-IDF, captures most-mentioned terms.
+    Works well for named entities (place names, landmark names).
+    
+    Parameters:
+    -----------
+    top_n : int
+        Number of top keywords to extract per cluster
+    
+    Returns:
+    --------
+    Dict mapping cluster_id -> [(keyword, frequency), ...]
+    """
+    from collections import Counter
+    import re
+    
+    # Filter out noise (-1)
+    df = df_clustered[df_clustered[cluster_col] != -1].copy()
+    
+    if text_col not in df.columns:
+        df = preprocess_text(df, text_col=text_col)
+    
+    stop_words = get_stopwords(["french", "english"])
+    
+    cluster_keywords = {}
+    
+    for cluster_id in sorted(df[cluster_col].unique()):
+        # Get all text for this cluster
+        cluster_text = " ".join(df[df[cluster_col] == cluster_id][text_col].tolist())
+        
+        # Tokenize: split by non-word characters, keep only words with 3+ chars
+        words = re.findall(r'\b[a-zàâäéèêëïîôùûü]{3,}\b', cluster_text.lower())
+        
+        # Filter stop words
+        words = [w for w in words if w not in stop_words]
+        
+        # Count frequency
+        counter = Counter(words)
+        top_keywords = counter.most_common(top_n)
+        
+        cluster_keywords[int(cluster_id)] = top_keywords
+    
+    return cluster_keywords
 
 
 def extract_cluster_descriptions(
@@ -342,8 +395,139 @@ def create_wordcloud_for_cluster(
     return output_path
 
 
+def combine_cluster_names(
+    tfidf_descriptions: List[ClusterDescription],
+    frequency_keywords: Dict[int, List[Tuple[str, int]]],
+) -> Dict[int, str]:
+    """
+    Combine TF-IDF and Frequency-based naming.
+    
+    Strategy:
+    1. Use TF-IDF for discriminative keywords (what makes cluster unique)
+    2. Use Frequency for common/recognizable terms (place names)
+    3. Combine top 1-2 from each for final name
+    
+    Returns:
+    --------
+    Dict mapping cluster_id -> cluster_name (str)
+    """
+    cluster_names = {}
+    
+    for desc in tfidf_descriptions:
+        cluster_id = desc.cluster_id
+        
+        # Top TF-IDF keywords (tend to be unique to cluster)
+        tfidf_keywords = desc.top_keywords[:2]
+        
+        # Top frequency keywords for this cluster
+        freq_keywords = []
+        if cluster_id in frequency_keywords:
+            freq_keywords = [kw for kw, _ in frequency_keywords[cluster_id][:2]]
+        
+        # Combine: prefer frequency keywords if they're recognizable place names
+        # Otherwise use TF-IDF keywords
+        all_keywords = freq_keywords + tfidf_keywords
+        
+        # Build name from first 2-3 non-duplicate keywords
+        seen = set()
+        final_keywords = []
+        for kw in all_keywords:
+            if kw not in seen:
+                final_keywords.append(kw)
+                seen.add(kw)
+            if len(final_keywords) >= 2:
+                break
+        
+        # Capitalize and format
+        if final_keywords:
+            cluster_name = " & ".join([kw.title() for kw in final_keywords])
+        else:
+            cluster_name = f"POI {cluster_id}"
+        
+        cluster_names[cluster_id] = cluster_name
+    
+    return cluster_names
+
+
+def add_cluster_names_to_dataframe(
+    df_clustered: pd.DataFrame,
+    cluster_names: Dict[int, str],
+    *,
+    cluster_col: str = "cluster",
+    name_col: str = "cluster_name",
+) -> pd.DataFrame:
+    """
+    Add cluster names as a new column in the dataframe.
+    
+    Parameters:
+    -----------
+    df_clustered : DataFrame with cluster column
+    cluster_names : Dict mapping cluster_id -> cluster_name
+    name_col : str
+        Name of new column to add
+    
+    Returns:
+    --------
+    DataFrame with new 'cluster_name' column
+    """
+    df = df_clustered.copy()
+    
+    # Map cluster IDs to names
+    df[name_col] = df[cluster_col].map(cluster_names)
+    
+    # Fill any unmapped clusters (shouldn't happen, but just in case)
+    df[name_col] = df[name_col].fillna(df[cluster_col].apply(lambda x: f"Cluster {x}" if x != -1 else "Noise"))
+    
+    return df
+
+
+def save_named_clusters_csv(
+    df_clustered: pd.DataFrame,
+    output_path: str = "outputs/clustered_named.csv",
+) -> str:
+    """Save dataframe with cluster names to CSV."""
+    import os
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    df_clustered.to_csv(output_path, index=False)
+    return output_path
+
+
+def print_named_clusters(
+    df_clustered: pd.DataFrame,
+    *,
+    cluster_col: str = "cluster",
+    name_col: str = "cluster_name",
+    top_n: int = 15,
+):
+    """
+    Print cluster names with photo counts.
+    """
+    print("\n" + "="*80)
+    print("NAMED CLUSTERS (TF-IDF + Frequency Combined)")
+    print("="*80)
+    
+    # Group by cluster and name
+    cluster_info = df_clustered[df_clustered[cluster_col] != -1].groupby([cluster_col, name_col]).size().reset_index(name='n_photos')
+    cluster_info = cluster_info.sort_values('n_photos', ascending=False)
+    
+    print(f"\nTotal clusters: {len(cluster_info)}")
+    print(f"\nTop {top_n} clusters by size:\n")
+    
+    for idx, row in cluster_info.head(top_n).iterrows():
+        cluster_id = row[cluster_col]
+        name = row[name_col]
+        n_photos = row['n_photos']
+        
+        bar_length = int(n_photos / cluster_info['n_photos'].max() * 40)
+        bar = "█" * bar_length
+        
+        print(f"  {cluster_id:3d} | {name:30s} | {n_photos:5d} photos | {bar}")
+    
+    print("\n" + "="*80)
+
+
 if __name__ == "__main__":
-    # Test TF-IDF on clustered data
+    # Test both text mining algorithms
     try:
         from load_data import load_data
         from cleaning import clean_data
@@ -363,18 +547,41 @@ if __name__ == "__main__":
         print("Preprocessing text...")
         df_clustered = preprocess_text(df_clustered)
         
-        print("Extracting cluster descriptions (TF-IDF)...")
-        descriptions = extract_cluster_descriptions(df_clustered, top_n_keywords=10)
+        print("\n" + "="*80)
+        print("TEXT MINING: ALGORITHM 1 - TF-IDF (Discriminative Keywords)")
+        print("="*80)
+        tfidf_descriptions = extract_cluster_descriptions(df_clustered, top_n_keywords=10)
+        print_cluster_descriptions(tfidf_descriptions, top_n=10)
         
-        print_cluster_descriptions(descriptions, top_n=10)
+        out_csv_tfidf = save_descriptions_csv(tfidf_descriptions, "outputs/cluster_descriptions_tfidf.csv")
+        print(f"\n[OK] TF-IDF descriptions saved to: {out_csv_tfidf}")
         
-        out_csv = save_descriptions_csv(descriptions)
-        print(f"\n[OK] Descriptions saved to: {out_csv}")
+        print("\n" + "="*80)
+        print("TEXT MINING: ALGORITHM 2 - Keyword Frequency (Recognizable Terms)")
+        print("="*80)
+        frequency_keywords = extract_keywords_by_frequency(df_clustered, top_n=10)
+        
+        print("\nTop frequency keywords by cluster:")
+        for cluster_id in sorted(frequency_keywords.keys())[:10]:
+            keywords = frequency_keywords[cluster_id]
+            top_3 = ", ".join([f"{kw}({freq})" for kw, freq in keywords[:3]])
+            print(f"  Cluster {cluster_id}: {top_3}")
+        
+        print("\n" + "="*80)
+        print("COMBINING ALGORITHMS: TF-IDF + Frequency")
+        print("="*80)
+        cluster_names = combine_cluster_names(tfidf_descriptions, frequency_keywords)
+        
+        df_named = add_cluster_names_to_dataframe(df_clustered, cluster_names)
+        print_named_clusters(df_named, top_n=15)
+        
+        out_csv_named = save_named_clusters_csv(df_named, "outputs/clustered_named.csv")
+        print(f"\n[OK] Named clusters saved to: {out_csv_named}")
         
         # Create wordcloud for top 3 clusters
         print("\nGenerating wordclouds for top 3 clusters...")
-        for desc in descriptions[:3]:
-            out_img = create_wordcloud_for_cluster(df_clustered, desc.cluster_id)
+        for cluster_id in sorted(frequency_keywords.keys())[:3]:
+            out_img = create_wordcloud_for_cluster(df_clustered, cluster_id)
             if out_img:
                 print(f"[OK] Wordcloud saved: {out_img}")
         

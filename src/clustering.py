@@ -263,7 +263,122 @@ def make_cluster_map(
     return output_html
 
 
-if __name__ == "__main__":
+def make_cluster_map_named(
+    df_clustered: pd.DataFrame,
+    *,
+    lat_col: str = "lat",
+    lon_col: str = "long",
+    cluster_col: str = "cluster",
+    name_col: str = "cluster_name",
+    output_html: str = "outputs/map_clusters_named.html",
+    sample_n: int = 25000,
+    random_state: int = 42,
+    center: Tuple[float, float] = (45.7640, 4.8357),
+    zoom_start: int = 12,
+) -> str:
+    """
+    Build a Folium map with cluster names displayed.
+    
+    Enhanced version that shows cluster names in popups and map controls.
+    
+    Parameters:
+    -----------
+    name_col : str
+        Column containing cluster names (from text mining)
+    
+    Returns:
+    --------
+    output_html : str
+        Path to saved HTML map
+    """
+    import os
+    import folium
+    from folium import plugins
+    
+    _require_columns(df_clustered, [lat_col, lon_col, cluster_col])
+    
+    # Check if name column exists
+    if name_col not in df_clustered.columns:
+        print(f"[WARN] Column '{name_col}' not found. Using cluster IDs instead.")
+        name_col = cluster_col
+    
+    df = df_clustered.copy()
+    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+    df = df.dropna(subset=[lat_col, lon_col]).copy()
+    
+    # Exclude noise
+    df = df[df[cluster_col] != -1].copy()
+    
+    if sample_n > 0 and len(df) > sample_n:
+        df = df.sample(n=sample_n, random_state=random_state)
+    
+    m = folium.Map(location=list(center), zoom_start=zoom_start, control_scale=True)
+    
+    def color_for_cluster(cid: int) -> str:
+        if cid == -1:
+            return "#666666"
+        hue = (cid * 47) % 360
+        import colorsys
+        r, g, b = colorsys.hsv_to_rgb(hue / 360.0, 0.85, 0.95)
+        return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
+    
+    # Add markers with cluster names
+    for _, row in df.iterrows():
+        cid = int(row[cluster_col])
+        name = str(row[name_col]) if name_col in row and pd.notna(row[name_col]) else f"Cluster {cid}"
+        
+        # Create popup with cluster info
+        popup_text = f"""
+        <b>{name}</b><br>
+        ID: {cid}<br>
+        Lat: {row[lat_col]:.4f}<br>
+        Lon: {row[lon_col]:.4f}
+        """
+        
+        folium.CircleMarker(
+            location=(float(row[lat_col]), float(row[lon_col])),
+            radius=2.5,
+            fill=True,
+            color=color_for_cluster(cid),
+            fill_color=color_for_cluster(cid),
+            fill_opacity=0.7,
+            opacity=0.7,
+            popup=folium.Popup(popup_text, max_width=200),
+            tooltip=name,
+        ).add_to(m)
+    
+    # Add a legend showing cluster names
+    try:
+        # Get unique clusters and their names
+        cluster_legend = df[[cluster_col, name_col]].drop_duplicates().sort_values(cluster_col)
+        
+        legend_html = """
+        <div style="position: fixed; 
+                    bottom: 50px; right: 50px; width: 250px; height: 400px; 
+                    background-color: white; border:2px solid grey; z-index:9999; 
+                    font-size:12px; overflow-y: scroll; border-radius: 5px; padding: 10px;">
+        <b>Cluster Names</b><br><hr>
+        """
+        
+        for _, row in cluster_legend.head(20).iterrows():
+            cid = int(row[cluster_col])
+            name = str(row[name_col])
+            color = color_for_cluster(cid)
+            legend_html += f'<i style="background:{color}; width: 15px; height: 15px; display: inline-block; border-radius: 50%;"></i> {name}<br>'
+        
+        legend_html += "</div>"
+        
+        m.get_root().html.add_child(folium.Element(legend_html))
+    except Exception as e:
+        print(f"[WARN] Could not add legend: {e}")
+    
+    os.makedirs(os.path.dirname(output_html), exist_ok=True)
+    m.save(output_html)
+    return output_html
+
+
+
     # Pipeline test:
     # Run from project root: python src/clustering.py
     try:
@@ -545,3 +660,310 @@ def run_hdbscan(
     }
     
     return df, report
+
+
+# ============================================================================
+# PARAMETER OPTIMIZATION FUNCTIONS
+# ============================================================================
+
+def optimize_dbscan_parameters(
+    df_clean: pd.DataFrame,
+    *,
+    lat_col: str = "lat",
+    lon_col: str = "long",
+    eps_range: list = None,
+    min_samples_range: list = None,
+    metric: str = "silhouette",
+) -> Tuple[Dict, pd.DataFrame]:
+    """
+    Optimize DBSCAN parameters using grid search.
+    
+    Parameters:
+    -----------
+    eps_range : list
+        Range of eps values in meters to test (default: [40, 50, 60, 75])
+    min_samples_range : list
+        Range of min_samples values to test (default: [30, 50, 70])
+    metric : str
+        Metric to optimize: "silhouette", "davies_bouldin", or "balance"
+    
+    Returns:
+    --------
+    best_params : dict with optimal parameters
+    results_df : DataFrame with all tested parameter combinations
+    """
+    if eps_range is None:
+        eps_range = [40, 50, 60, 75]
+    if min_samples_range is None:
+        min_samples_range = [30, 50, 70]
+    
+    _require_columns(df_clean, [lat_col, lon_col])
+    
+    from sklearn.cluster import DBSCAN
+    from sklearn.metrics import silhouette_score, davies_bouldin_score
+    
+    df = df_clean.copy()
+    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+    df = df.dropna(subset=[lat_col, lon_col]).copy()
+    
+    coords_rad = _to_radians(df[lat_col].to_numpy(), df[lon_col].to_numpy())
+    
+    results = []
+    
+    print(f"\nOptimizing DBSCAN parameters (metric={metric})...")
+    print(f"Testing {len(eps_range)} × {len(min_samples_range)} = {len(eps_range)*len(min_samples_range)} combinations")
+    
+    for i, eps_m in enumerate(eps_range):
+        for j, min_samp in enumerate(min_samples_range):
+            print(f"  [{i*len(min_samples_range)+j+1}/{len(eps_range)*len(min_samples_range)}] eps={eps_m}m, min_samples={min_samp}...", end=' ', flush=True)
+            
+            eps_rad = _eps_meters_to_radians(eps_m)
+            
+            model = DBSCAN(
+                eps=eps_rad,
+                min_samples=min_samp,
+                metric="haversine",
+                algorithm="ball_tree",
+                n_jobs=-1,
+            )
+            
+            labels = model.fit_predict(coords_rad)
+            
+            n_clusters = int(len(set(labels)) - (1 if -1 in labels else 0))
+            noise_points = int((labels == -1).sum())
+            noise_ratio = float(noise_points / len(labels)) if len(labels) else 0.0
+            
+            # Calculate metrics
+            silhouette_val = None
+            davies_bouldin_val = None
+            
+            mask_no_noise = labels != -1
+            if mask_no_noise.sum() > 1 and n_clusters > 1:
+                try:
+                    silhouette_val = float(silhouette_score(coords_rad[mask_no_noise], labels[mask_no_noise], metric='haversine'))
+                    davies_bouldin_val = float(davies_bouldin_score(coords_rad[mask_no_noise], labels[mask_no_noise]))
+                except:
+                    pass
+            
+            print(f"clusters={n_clusters}, noise={noise_ratio:.1%}")
+            
+            results.append({
+                "eps_meters": eps_m,
+                "min_samples": min_samp,
+                "n_clusters": n_clusters,
+                "noise_points": noise_points,
+                "noise_ratio": noise_ratio,
+                "silhouette_score": silhouette_val,
+                "davies_bouldin_index": davies_bouldin_val,
+            })
+    
+    results_df = pd.DataFrame(results)
+    
+    # Select best parameters based on metric
+    if metric == "silhouette":
+        # Higher silhouette is better
+        valid = results_df[results_df["silhouette_score"].notna()]
+        if len(valid) > 0:
+            best_idx = valid["silhouette_score"].idxmax()
+        else:
+            # Fallback: balance between clusters and noise
+            best_idx = results_df[(results_df['n_clusters'] > 20) & (results_df['n_clusters'] < 100)]['noise_ratio'].idxmin()
+    elif metric == "davies_bouldin":
+        # Lower DB is better
+        valid = results_df[results_df["davies_bouldin_index"].notna()]
+        if len(valid) > 0:
+            best_idx = valid["davies_bouldin_index"].idxmin()
+        else:
+            best_idx = results_df[(results_df['n_clusters'] > 20) & (results_df['n_clusters'] < 100)]['noise_ratio'].idxmin()
+    else:  # "balance"
+        # Find sweet spot: 30-60 clusters, <70% noise
+        valid = results_df[(results_df['n_clusters'] >= 30) & (results_df['n_clusters'] <= 60) & (results_df['noise_ratio'] < 0.7)]
+        if len(valid) > 0:
+            best_idx = valid['silhouette_score'].idxmax() if valid['silhouette_score'].notna().any() else valid.index[0]
+        else:
+            best_idx = results_df[(results_df['n_clusters'] > 20) & (results_df['n_clusters'] < 100)]['noise_ratio'].idxmin()
+    
+    best_row = results_df.loc[best_idx]
+    best_params = {
+        "eps_meters": float(best_row["eps_meters"]),
+        "min_samples": int(best_row["min_samples"]),
+    }
+    
+    print(f"✅ Best parameters found: eps={best_params['eps_meters']}m, min_samples={best_params['min_samples']}")
+    
+    return best_params, results_df
+
+
+def optimize_kmeans_parameters(
+    df_clean: pd.DataFrame,
+    *,
+    lat_col: str = "lat",
+    lon_col: str = "long",
+    k_range: list = None,
+) -> Tuple[int, pd.DataFrame]:
+    """
+    Optimize K-Means number of clusters using elbow + silhouette methods.
+    
+    Parameters:
+    -----------
+    k_range : list
+        Range of K values to test (default: [20, 30, 40, 50, 60, 70, 80])
+    
+    Returns:
+    --------
+    optimal_k : int
+        Optimal number of clusters
+    results_df : DataFrame with metrics for each K
+    """
+    if k_range is None:
+        k_range = [20, 30, 40, 50, 60, 70, 80]
+    
+    _require_columns(df_clean, [lat_col, lon_col])
+    
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+    
+    df = df_clean.copy()
+    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+    df = df.dropna(subset=[lat_col, lon_col]).copy()
+    
+    X = _gps_to_cartesian(df[lat_col].to_numpy(), df[lon_col].to_numpy())
+    
+    results = []
+    
+    print(f"\nOptimizing K-Means (testing K={k_range[0]}-{k_range[-1]})...")
+    
+    for i, k in enumerate(k_range):
+        print(f"  [{i+1}/{len(k_range)}] K={k}...", end=' ', flush=True)
+        
+        model = KMeans(n_clusters=k, random_state=42, n_init=5, max_iter=300)
+        labels = model.fit_predict(X)
+        
+        inertia = float(model.inertia_)
+        silhouette = float(silhouette_score(X, labels))
+        
+        print(f"silhouette={silhouette:.4f}")
+        
+        results.append({
+            "k": k,
+            "inertia": inertia,
+            "silhouette_score": silhouette,
+        })
+    
+    results_df = pd.DataFrame(results)
+    
+    # Find optimal K using silhouette (higher is better)
+    optimal_k = int(results_df.loc[results_df["silhouette_score"].idxmax(), "k"])
+    
+    print(f"✅ Optimal K (max silhouette): {optimal_k}")
+    
+    return optimal_k, results_df
+
+
+def optimize_hdbscan_parameters(
+    df_clean: pd.DataFrame,
+    *,
+    lat_col: str = "lat",
+    lon_col: str = "long",
+    min_cluster_size_range: list = None,
+    min_samples_range: list = None,
+) -> Tuple[Dict, pd.DataFrame]:
+    """
+    Optimize HDBSCAN parameters using grid search.
+    
+    Parameters:
+    -----------
+    min_cluster_size_range : list
+        Range of min_cluster_size values (default: [40, 50, 60])
+    min_samples_range : list
+        Range of min_samples values (default: [20, 50])
+    
+    Returns:
+    --------
+    best_params : dict with optimal parameters
+    results_df : DataFrame with all tested combinations
+    """
+    try:
+        import hdbscan
+    except ImportError:
+        raise ImportError("hdbscan not installed")
+    
+    if min_cluster_size_range is None:
+        min_cluster_size_range = [40, 50, 60]
+    if min_samples_range is None:
+        min_samples_range = [20, 50]
+    
+    _require_columns(df_clean, [lat_col, lon_col])
+    
+    from sklearn.metrics import silhouette_score
+    
+    df = df_clean.copy()
+    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+    df = df.dropna(subset=[lat_col, lon_col]).copy()
+    
+    coords_rad = _to_radians(df[lat_col].to_numpy(), df[lon_col].to_numpy())
+    
+    results = []
+    
+    print(f"\nOptimizing HDBSCAN parameters...")
+    print(f"Testing {len(min_cluster_size_range)} × {len(min_samples_range)} = {len(min_cluster_size_range)*len(min_samples_range)} combinations")
+    
+    for i, min_csize in enumerate(min_cluster_size_range):
+        for j, min_samp in enumerate(min_samples_range):
+            print(f"  [{i*len(min_samples_range)+j+1}/{len(min_cluster_size_range)*len(min_samples_range)}] min_cluster_size={min_csize}, min_samples={min_samp}...", end=' ', flush=True)
+            
+            model = hdbscan.HDBSCAN(
+                min_cluster_size=min_csize,
+                min_samples=min_samp,
+                metric="haversine",
+                core_dist_n_jobs=-1,
+            )
+            
+            labels = model.fit_predict(coords_rad)
+            
+            n_clusters = int(len(set(labels)) - (1 if -1 in labels else 0))
+            noise_points = int((labels == -1).sum())
+            noise_ratio = float(noise_points / len(labels)) if len(labels) else 0.0
+            
+            # Calculate metrics
+            silhouette_val = None
+            
+            mask_no_noise = labels != -1
+            if mask_no_noise.sum() > 1 and n_clusters > 1:
+                try:
+                    silhouette_val = float(silhouette_score(coords_rad[mask_no_noise], labels[mask_no_noise], metric='haversine'))
+                except:
+                    pass
+            
+            print(f"clusters={n_clusters}, noise={noise_ratio:.1%}")
+            
+            results.append({
+                "min_cluster_size": min_csize,
+                "min_samples": min_samp,
+                "n_clusters": n_clusters,
+                "noise_points": noise_points,
+                "noise_ratio": noise_ratio,
+                "silhouette_score": silhouette_val,
+            })
+    
+    results_df = pd.DataFrame(results)
+    
+    # Select best: balance clusters and noise
+    valid = results_df[(results_df['n_clusters'] >= 30) & (results_df['n_clusters'] <= 60) & (results_df['noise_ratio'] < 0.75)]
+    if len(valid) > 0:
+        best_idx = valid['silhouette_score'].idxmax() if valid['silhouette_score'].notna().any() else valid.index[0]
+    else:
+        best_idx = results_df[(results_df['n_clusters'] > 20) & (results_df['n_clusters'] < 100)].index[0]
+    
+    best_row = results_df.loc[best_idx]
+    best_params = {
+        "min_cluster_size": int(best_row["min_cluster_size"]),
+        "min_samples": int(best_row["min_samples"]),
+    }
+    
+    print(f"✅ Best parameters found: min_cluster_size={best_params['min_cluster_size']}, min_samples={best_params['min_samples']}")
+    
+    return best_params, results_df

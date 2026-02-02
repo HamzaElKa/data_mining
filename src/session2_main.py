@@ -1,224 +1,257 @@
-# src/session2_main.py
-# Session 2 — Complete pipeline with algorithm comparison, text mining, and temporal analysis
-# Features:
-# 1. Optimize and compare 3 clustering algorithms (DBSCAN, K-Means, HDBSCAN)
-# 2. Finalize text mining for automatic cluster naming (TF-IDF + descriptive keywords)
-# 3. Explore temporal patterns in the Flickr data
-# 4. Generate cluster descriptions and enhanced maps with cluster names
+# src/main.py
+# Complete end-to-end pipeline: Session 1 + Session 2
+# Load -> Clean -> Map -> Algorithm Comparison -> DBSCAN -> Text Mining -> Named Outputs
 
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Tuple
 
-import pandas as pd
-import numpy as np
+from load_data import load_data, print_report
+from cleaning import clean_data, print_cleaning_report
+from visualization import create_map, MapConfig
+from clustering import (
+    run_dbscan_geo,
+    print_cluster_report,
+    save_clustered_csv,
+    make_cluster_map,
+    make_cluster_map_named,
+)
+from comparison import compare_algorithms, generate_recommendation, save_comparison_csv
+from text_mining import (
+    extract_cluster_descriptions,
+    extract_keywords_by_frequency,
+    combine_cluster_names,
+    add_cluster_names_to_dataframe,
+    save_named_clusters_csv,
+    print_named_clusters,
+)
 
 
 def main() -> None:
     """
-    Complete Session 2 pipeline:
-    load_data -> clean -> comparison -> text_mining -> temporal_analysis -> outputs
+    Complete unified pipeline: Sessions 1 + 2
+    1. Load + explore
+    2. Clean
+    3. Initial map visualization
+    4. Algorithm comparison (DBSCAN, K-Means, HDBSCAN)
+    5. DBSCAN clustering (recommended)
+    6. Text mining (dual algorithms: TF-IDF + Frequency)
+    7. Save all outputs (CSV, maps, cluster names)
     """
-    
-    # ---- Paths ----
-    csv_path = "../flickr_data2.csv"
+    # ---- Paths (run from project root or src/) ----
+    csv_path = "../flickr_data2.csv"  # File at project root
     os.makedirs("outputs", exist_ok=True)
-    
-    print("="*80)
-    print("SESSION 2 — COMPLETE CLUSTERING & TEXT MINING PIPELINE")
-    print("="*80)
-    
-    # ---- 1) Load + Clean ----
-    print("\n[STEP 1/5] Loading and cleaning data...")
-    from load_data import load_data, print_report
-    from cleaning import clean_data, print_cleaning_report
-    
+
+    # ========== STEP 1: Load + Explore ==========
+    print("\n" + "="*60)
+    print("[STEP 1/7] Loading data...")
+    print("="*60)
     df_raw, rep_raw = load_data(csv_path)
+    print_report(rep_raw)
+
+    # ========== STEP 2: Clean ==========
+    print("\n" + "="*60)
+    print("[STEP 2/7] Cleaning data...")
+    print("="*60)
     df_clean, rep_clean = clean_data(df_raw)
     print_cleaning_report(rep_clean)
-    
-    # ---- 2) Algorithm Comparison ----
-    print("\n[STEP 2/5] Comparing 3 clustering algorithms...")
-    from comparison import (
-        compare_algorithms,
-        print_comparison_table,
-        save_comparison_csv,
-        plot_elbow_silhouette,
-        generate_recommendation,
+
+    # ========== STEP 3: Initial Map ==========
+    print("\n" + "="*60)
+    print("[STEP 3/7] Creating initial map...")
+    print("="*60)
+    map_cfg = MapConfig(
+        output_html="outputs/map_session1.html",
+        sample_n=15000,
+        random_state=42,
+        center=(45.7640, 4.8357),
+        zoom_start=12,
+        max_markers=15000,
     )
-    
-    comparison_df = compare_algorithms(
-        df_clean,
-        dbscan_params={"eps_meters": 50.0, "min_samples": 50, "deduplicate_coords": True},
-        kmeans_params={"n_clusters": 50},
-        hdbscan_params={"min_cluster_size": 50, "min_samples": 50},
-    )
-    
-    print_comparison_table(comparison_df)
-    out_comparison_csv = save_comparison_csv(comparison_df)
-    print(f"[OK] Comparison metrics saved to: {out_comparison_csv}")
-    
-    # Plot elbow curve
+    out_map = create_map(df_clean, cfg=map_cfg)
+    print(f"[OK] Initial map saved to: {out_map}")
+
+    # ========== STEP 4: Algorithm Comparison ==========
+    print("\n" + "="*60)
+    print("[STEP 4/7] Comparing clustering algorithms...")
+    print("="*60)
     try:
-        out_elbow = plot_elbow_silhouette(df_clean, k_range=range(20, 81, 10))
-        print(f"[OK] Elbow plot saved to: {out_elbow}")
+        comparison_metrics = compare_algorithms(df_clean)
+        recommendation = generate_recommendation(comparison_metrics)
+        print("\n[Comparison Results]")
+        print(recommendation["summary"])
+        print(f"\n[Recommended Algorithm: {recommendation['recommended']}]")
+        print(f"Score: {recommendation['score']}/5.00")
+        
+        # Save comparison metrics
+        out_comparison = save_comparison_csv(
+            comparison_metrics, "outputs/comparison_metrics.csv"
+        )
+        print(f"\n[OK] Metrics saved to: {out_comparison}")
     except Exception as e:
-        print(f"[WARN] Could not generate elbow plot: {e}")
-    
-    # Print recommendation
-    recommendation = generate_recommendation(comparison_df)
-    
-    # ---- 3) Optimal Clustering (DBSCAN recommended) ----
-    print("\n[STEP 3/5] Running optimal clustering (DBSCAN)...")
-    from clustering import run_dbscan_geo, print_cluster_report, save_clustered_csv, make_cluster_map
-    
+        print(f"[WARN] Algorithm comparison skipped: {e}")
+        recommendation = {"recommended": "DBSCAN"}
+
+    # ========== STEP 5: DBSCAN Clustering ==========
+    print("\n" + "="*60)
+    print("[STEP 5/7] Running DBSCAN clustering...")
+    print("="*60)
+    eps_meters = 50.0   # 50m radius for distinct POIs
+    min_samples = 50    # 50 photos minimum for significant POIs
+
     df_clustered, rep_cluster = run_dbscan_geo(
         df_clean,
-        eps_meters=50.0,
-        min_samples=50,
-        deduplicate_coords=True,
-        coord_precision=4,
+        eps_meters=eps_meters,
+        min_samples=min_samples,
+        cluster_col="cluster",
+        deduplicate_coords=True,  # Avoid over-representation
+        coord_precision=4,  # ~11m precision
     )
     print_cluster_report(rep_cluster)
     
-    out_clustered_csv = save_clustered_csv(df_clustered, "outputs/clustered.csv")
-    print(f"[OK] Clustered data saved to: {out_clustered_csv}")
+    # Save initial clustering result
+    out_csv = save_clustered_csv(df_clustered, "outputs/clustered.csv")
+    print(f"[OK] Clustered data saved to: {out_csv}")
+
+    # ========== STEP 6: Text Mining (Dual Algorithm) ==========
+    print("\n" + "="*60)
+    print("[STEP 6/7] Running dual text mining algorithms...")
+    print("="*60)
     
-    # ---- 4) Text Mining for Cluster Names ----
-    print("\n[STEP 4/5] Generating cluster descriptions with TF-IDF...")
-    from text_mining import (
-        preprocess_text,
-        extract_cluster_descriptions,
-        save_descriptions_csv,
-        print_cluster_descriptions,
-        create_wordcloud_for_cluster,
-    )
-    
-    df_clustered = preprocess_text(df_clustered, text_col="text")
-    descriptions = extract_cluster_descriptions(
-        df_clustered,
-        cluster_col="cluster",
-        text_col="text",
-        top_n_keywords=10,
-        min_df=2,
-        max_df=0.8,
-    )
-    
-    print_cluster_descriptions(descriptions, top_n=15)
-    out_descriptions_csv = save_descriptions_csv(descriptions)
-    print(f"[OK] Cluster descriptions saved to: {out_descriptions_csv}")
-    
-    # Create wordclouds for top 5 clusters
-    print("\nGenerating word clouds for top 5 clusters...")
-    for desc in descriptions[:5]:
-        try:
-            out_wordcloud = create_wordcloud_for_cluster(
-                df_clustered,
-                desc.cluster_id,
-                output_path=f"outputs/wordcloud_cluster_{desc.cluster_id}.png",
-            )
-            if out_wordcloud:
-                print(f"  [OK] Wordcloud for cluster {desc.cluster_id}: {out_wordcloud}")
-        except Exception as e:
-            print(f"  [WARN] Could not create wordcloud for cluster {desc.cluster_id}: {e}")
-    
-    # ---- 5) Temporal Analysis ----
-    print("\n[STEP 5/5] Exploring temporal patterns...")
-    temporal_results = perform_temporal_analysis(df_clustered)
-    
-    # ---- 6) Enhanced Cluster Map with Names ----
-    print("\n[STEP 6] Creating enhanced cluster map with cluster names...")
+    print("\n[6a] Algorithm 1: TF-IDF extraction...")
     try:
-        from visualization import create_cluster_map_with_names
-        
-        out_cluster_map = create_cluster_map_with_names(
+        tfidf_names = extract_cluster_descriptions(
             df_clustered,
-            descriptions=descriptions,
+            cluster_col="cluster",
+            n_keywords=5,
+        )
+        print(f"  ✓ TF-IDF names extracted for {len(tfidf_names)} clusters")
+    except Exception as e:
+        print(f"  ✗ TF-IDF failed: {e}")
+        tfidf_names = {}
+
+    print("\n[6b] Algorithm 2: Keyword frequency extraction...")
+    try:
+        freq_names = extract_keywords_by_frequency(
+            df_clustered,
+            cluster_col="cluster",
+            n_keywords=5,
+        )
+        print(f"  ✓ Frequency names extracted for {len(freq_names)} clusters")
+    except Exception as e:
+        print(f"  ✗ Frequency failed: {e}")
+        freq_names = {}
+
+    print("\n[6c] Combining TF-IDF + Keyword Frequency...")
+    try:
+        combined_names = combine_cluster_names(tfidf_names, freq_names)
+        print(f"  ✓ Combined names created for {len(combined_names)} clusters")
+    except Exception as e:
+        print(f"  ✗ Combination failed: {e}")
+        combined_names = {}
+
+    print("\n[6d] Adding cluster names to dataframe...")
+    try:
+        df_named = add_cluster_names_to_dataframe(
+            df_clustered.copy(),
+            combined_names,
+            cluster_col="cluster",
+            name_col="cluster_name",
+        )
+        print(f"  ✓ Cluster names integrated into dataframe")
+    except Exception as e:
+        print(f"  ✗ Integration failed: {e}")
+        df_named = df_clustered.copy()
+        df_named["cluster_name"] = df_named["cluster"].astype(str)
+
+    print("\n[6e] Displaying cluster names...")
+    try:
+        print_named_clusters(df_named, cluster_col="cluster", name_col="cluster_name")
+    except Exception as e:
+        print(f"  ✗ Display failed: {e}")
+
+    # ========== STEP 7: Save All Outputs ==========
+    print("\n" + "="*60)
+    print("[STEP 7/7] Saving outputs...")
+    print("="*60)
+
+    # Save named clusters CSV
+    print("\n[7a] Saving named clusters CSV...")
+    try:
+        out_named_csv = save_named_clusters_csv(
+            df_named, "outputs/clustered_named.csv", name_col="cluster_name"
+        )
+        print(f"  ✓ Saved to: {out_named_csv}")
+    except Exception as e:
+        print(f"  ✗ Save failed: {e}")
+
+    # Save cluster names reference
+    print("\n[7b] Saving cluster names reference...")
+    try:
+        cluster_ref = df_named.groupby("cluster")["cluster_name"].first().reset_index()
+        cluster_ref = cluster_ref.sort_values("cluster")
+        cluster_ref.to_csv("outputs/cluster_names_reference.csv", index=False)
+        print(f"  ✓ Saved to: outputs/cluster_names_reference.csv")
+        print(f"     {len(cluster_ref)} clusters documented")
+    except Exception as e:
+        print(f"  ✗ Save failed: {e}")
+
+    # Basic cluster map
+    print("\n[7c] Creating basic cluster map...")
+    try:
+        out_cluster_map = make_cluster_map(
+            df_clustered,
+            output_html="outputs/map_clusters.html",
+            sample_n=25000,
+            random_state=42,
+            center=(45.7640, 4.8357),
+            zoom_start=12,
+        )
+        print(f"  ✓ Saved to: {out_cluster_map}")
+    except Exception as e:
+        print(f"  ✗ Map creation failed: {e}")
+
+    # Named cluster map (with cluster names in legend)
+    print("\n[7d] Creating named cluster map...")
+    try:
+        out_named_map = make_cluster_map_named(
+            df_named,
             output_html="outputs/map_clusters_named.html",
             sample_n=25000,
+            random_state=42,
+            center=(45.7640, 4.8357),
+            zoom_start=12,
+            cluster_col="cluster",
+            name_col="cluster_name",
         )
-        print(f"[OK] Enhanced cluster map with names saved to: {out_cluster_map}")
+        print(f"  ✓ Saved to: {out_named_map}")
+        print(f"     ⭐ THIS IS THE MAIN INTERACTIVE VISUALIZATION")
     except Exception as e:
-        print(f"[WARN] Could not create enhanced cluster map: {e}")
-    
-    # ---- Final Summary ----
-    print("\n" + "="*80)
-    print("✅ SESSION 2 PIPELINE COMPLETED SUCCESSFULLY")
-    print("="*80)
-    print("\nGenerated files:")
-    print(f"  - {out_comparison_csv} (algorithm comparison metrics)")
-    print(f"  - {out_clustered_csv} (clustered data with DBSCAN)")
-    print(f"  - {out_descriptions_csv} (TF-IDF cluster descriptions)")
-    print(f"  - outputs/map_clusters.html (interactive cluster map)")
-    print(f"  - outputs/wordcloud_cluster_*.png (word clouds for top clusters)")
-    print(f"\n📊 Key Results:")
-    print(f"  - Total clusters: {rep_cluster.n_clusters}")
-    print(f"  - Noise points: {rep_cluster.noise_points} ({rep_cluster.noise_ratio*100:.1f}%)")
-    print(f"  - Largest cluster: {rep_cluster.cluster_sizes_top10[0][1]:,} photos")
-    print(f"\n💡 Recommendation: Use DBSCAN for discovering POIs in urban areas")
-    print("="*80 + "\n")
+        print(f"  ✗ Named map creation failed: {e}")
 
-
-def perform_temporal_analysis(df_clustered: pd.DataFrame) -> Dict:
-    """
-    Analyze temporal patterns in the Flickr data.
-    - Photos per month
-    - Photos per cluster over time
-    - Most active time periods
-    """
-    print("\nTemporal Analysis:")
-    print("-" * 80)
-    
-    # Ensure taken_dt is datetime
-    if "taken_dt" in df_clustered.columns:
-        df_clustered["taken_dt"] = pd.to_datetime(df_clustered["taken_dt"], errors="coerce")
-        
-        # Photos per month
-        monthly_counts = df_clustered.set_index("taken_dt").resample("MS").size()
-        print(f"\n  Total time span: {df_clustered['taken_dt'].min()} to {df_clustered['taken_dt'].max()}")
-        print(f"  Peak month: {monthly_counts.idxmax().strftime('%B %Y')} ({monthly_counts.max()} photos)")
-        print(f"  Average per month: {monthly_counts.mean():.0f} photos")
-        
-        # Cluster activity heatmap
-        cluster_temporal = df_clustered.groupby("cluster").agg({
-            "taken_dt": ["min", "max", "count"]
-        }).round(0)
-        
-        print(f"\n  Top 5 most photographed clusters (by date range):")
-        for cluster_id in df_clustered.groupby("cluster").size().nlargest(5).index:
-            cluster_photos = df_clustered[df_clustered["cluster"] == cluster_id]
-            min_date = cluster_photos["taken_dt"].min()
-            max_date = cluster_photos["taken_dt"].max()
-            n_photos = len(cluster_photos)
-            print(f"    Cluster {cluster_id}: {n_photos:,} photos ({min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')})")
-        
-        # Save temporal analysis
-        temporal_csv = "outputs/temporal_analysis.csv"
-        temporal_data = []
-        for cluster_id in df_clustered["cluster"].unique():
-            if cluster_id == -1:
-                continue
-            cluster_df = df_clustered[df_clustered["cluster"] == cluster_id]
-            temporal_data.append({
-                "cluster_id": int(cluster_id),
-                "n_photos": len(cluster_df),
-                "min_date": cluster_df["taken_dt"].min(),
-                "max_date": cluster_df["taken_dt"].max(),
-                "span_days": (cluster_df["taken_dt"].max() - cluster_df["taken_dt"].min()).days,
-            })
-        
-        temporal_df = pd.DataFrame(temporal_data).sort_values("n_photos", ascending=False)
-        temporal_df.to_csv(temporal_csv, index=False)
-        print(f"\n  [OK] Temporal analysis saved to: {temporal_csv}")
-        
-        return {
-            "monthly_counts": monthly_counts.to_dict(),
-            "temporal_csv": temporal_csv,
-        }
-    else:
-        print("  [WARN] No 'taken_dt' column found. Skipping temporal analysis.")
-        return {}
+    # ========== SUMMARY ==========
+    print("\n" + "="*60)
+    print("✅ PIPELINE COMPLETED SUCCESSFULLY")
+    print("="*60)
+    print("\n📊 Generated outputs in 'outputs/' directory:")
+    print("  • map_session1.html - Raw data visualization")
+    print("  • map_clusters.html - Basic cluster map")
+    print("  • map_clusters_named.html - ⭐ Interactive map with cluster names")
+    print("  • clustered.csv - Raw clustering results")
+    print("  • clustered_named.csv - With automatic cluster names")
+    print("  • cluster_names_reference.csv - Cluster ID → Name mapping")
+    print("  • comparison_metrics.csv - Algorithm comparison scores")
+    print("\n📈 Key Statistics:")
+    n_clusters = df_clustered["cluster"].max() + 1
+    noise = (df_clustered["cluster"] == -1).sum()
+    print(f"  • Clusters discovered: {n_clusters}")
+    print(f"  • Noise points: {noise} ({100*noise/len(df_clustered):.1f}%)")
+    print(f"  • Processing time: See timestamps above")
+    print("\n💡 Next steps:")
+    print("  1. Open outputs/map_clusters_named.html in a browser")
+    print("  2. Explore the interactive map")
+    print("  3. Review cluster names and interpretations")
+    print("  4. Check outputs/clustered_named.csv for detailed data")
 
 
 if __name__ == "__main__":
