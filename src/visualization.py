@@ -114,6 +114,129 @@ def create_map(
     return cfg.output_html
 
 
+def create_cluster_map_with_names(
+    df_clustered: pd.DataFrame,
+    descriptions: dict = None,
+    *,
+    lat_col: str = "lat",
+    lon_col: str = "long",
+    cluster_col: str = "cluster",
+    text_col: str = "text",
+    output_html: str = "outputs/map_clusters_named.html",
+    sample_n: int = 25000,
+    random_state: int = 42,
+    center: Tuple[float, float] = (45.7640, 4.8357),
+    zoom_start: int = 12,
+) -> str:
+    """
+    Create an interactive Folium map with clusters colored by ID and labeled with TF-IDF descriptions.
+    
+    Parameters:
+    -----------
+    descriptions : dict or list
+        Either a dict mapping cluster_id -> description string,
+        or a list of ClusterDescription objects
+    
+    Returns:
+    --------
+    output_html : str
+    """
+    import os
+    import folium
+    
+    _require_columns(df_clustered, [lat_col, lon_col, cluster_col])
+    
+    df = df_clustered.copy()
+    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+    df = df.dropna(subset=[lat_col, lon_col]).copy()
+    
+    # Exclude noise
+    df = df[df[cluster_col] != -1].copy()
+    
+    if sample_n > 0 and len(df) > sample_n:
+        df = df.sample(n=sample_n, random_state=random_state)
+    
+    # Build cluster centroid map for cluster labels
+    cluster_centers = {}
+    for cid in df[cluster_col].unique():
+        cluster_data = df[df[cluster_col] == cid]
+        center_lat = cluster_data[lat_col].mean()
+        center_lon = cluster_data[lon_col].mean()
+        cluster_centers[int(cid)] = (center_lat, center_lon)
+    
+    # Convert descriptions if needed
+    descriptions_dict = {}
+    if descriptions:
+        if isinstance(descriptions, dict):
+            descriptions_dict = descriptions
+        else:
+            # Assume list of ClusterDescription objects
+            for desc in descriptions:
+                if hasattr(desc, 'cluster_id') and hasattr(desc, 'description'):
+                    descriptions_dict[int(desc.cluster_id)] = desc.description
+    
+    # Build map
+    m = folium.Map(location=list(center), zoom_start=zoom_start, control_scale=True)
+    
+    # Color function
+    def color_for_cluster(cid: int) -> str:
+        if cid == -1:
+            return "#666666"
+        import colorsys
+        hue = (cid * 47) % 360
+        r, g, b = colorsys.hsv_to_rgb(hue / 360.0, 0.85, 0.95)
+        return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
+    
+    # Add markers for each point
+    for _, row in df.iterrows():
+        cid = int(row[cluster_col])
+        lat = float(row[lat_col])
+        lon = float(row[lon_col])
+        
+        folium.CircleMarker(
+            location=(lat, lon),
+            radius=3,
+            fill=True,
+            color=color_for_cluster(cid),
+            fill_color=color_for_cluster(cid),
+            fill_opacity=0.7,
+            opacity=0.7,
+            popup=f"Cluster {cid}",
+        ).add_to(m)
+    
+    # Add cluster center markers with labels
+    for cid, (center_lat, center_lon) in cluster_centers.items():
+        cluster_name = descriptions_dict.get(cid, f"Cluster {cid}")
+        
+        # Add a larger circle for cluster center
+        folium.CircleMarker(
+            location=(center_lat, center_lon),
+            radius=8,
+            fill=True,
+            color=color_for_cluster(cid),
+            fill_color=color_for_cluster(cid),
+            fill_opacity=0.9,
+            opacity=0.9,
+            popup=folium.Popup(
+                f"<b>{cluster_name}</b><br/>Cluster ID: {cid}",
+                max_width=300
+            ),
+            weight=3,
+        ).add_to(m)
+        
+        # Add text label near cluster center
+        folium.Marker(
+            location=(center_lat, center_lon),
+            popup=cluster_name,
+            icon=folium.Icon(color='gray', icon='info-sign', prefix='glyphicon'),
+        ).add_to(m)
+    
+    os.makedirs(os.path.dirname(output_html), exist_ok=True)
+    m.save(output_html)
+    return output_html
+
+
 if __name__ == "__main__":
     # Full pipeline test:
     # Run from project root:

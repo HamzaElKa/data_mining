@@ -56,13 +56,27 @@ def compare_algorithms(
     
     # Calculate silhouette for DBSCAN (exclude noise)
     from sklearn.metrics import silhouette_score, davies_bouldin_score
+    import numpy as np
     mask = df_dbscan['cluster'] != -1
     if mask.sum() > 1:
         from clustering import _gps_to_cartesian
-        X = _gps_to_cartesian(df_dbscan.loc[mask, 'lat'].to_numpy(), df_dbscan.loc[mask, 'long'].to_numpy())
-        labels = df_dbscan.loc[mask, 'cluster'].to_numpy()
-        results[-1]["silhouette_score"] = f"{silhouette_score(X, labels):.4f}"
-        results[-1]["davies_bouldin_index"] = f"{davies_bouldin_score(X, labels):.4f}"
+        try:
+            # Try to calculate on full data
+            X = _gps_to_cartesian(df_dbscan.loc[mask, 'lat'].to_numpy(), df_dbscan.loc[mask, 'long'].to_numpy())
+            labels = df_dbscan.loc[mask, 'cluster'].to_numpy()
+            
+            # Check if dataset is too large for silhouette (>5000 samples)
+            if len(X) > 5000:
+                print(f"  (Skipping silhouette on {len(X):,} samples - too memory-intensive)")
+                results[-1]["silhouette_score"] = "Skipped (large dataset)"
+                results[-1]["davies_bouldin_index"] = "Skipped (large dataset)"
+            else:
+                results[-1]["silhouette_score"] = f"{silhouette_score(X, labels):.4f}"
+                results[-1]["davies_bouldin_index"] = f"{davies_bouldin_score(X, labels):.4f}"
+        except (MemoryError, Exception) as e:
+            print(f"  (Memory error calculating metrics: {type(e).__name__})")
+            results[-1]["silhouette_score"] = "Memory error"
+            results[-1]["davies_bouldin_index"] = "Memory error"
     
     # 2. K-Means
     print("\n[2/3] Running K-Means...")
@@ -94,8 +108,8 @@ def compare_algorithms(
             "davies_bouldin_index": f"{report_hdbscan['davies_bouldin_index']:.4f}" if report_hdbscan['davies_bouldin_index'] else "N/A",
             "parameters": f"min_cluster_size={hdbscan_params['min_cluster_size']}, min_samples={hdbscan_params['min_samples']}",
         })
-    except ImportError:
-        print("[WARN] HDBSCAN not installed. Skipping.")
+    except (ImportError, MemoryError) as e:
+        print(f"[WARN] HDBSCAN failed: {type(e).__name__}. Skipping.")
         results.append({
             "algorithm": "HDBSCAN",
             "n_clusters": "N/A",
