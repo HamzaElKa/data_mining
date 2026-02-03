@@ -1106,3 +1106,320 @@ def optimize_hdbscan_parameters(
     print(f"✅ Best parameters found: min_cluster_size={best_params['min_cluster_size']}, min_samples={best_params['min_samples']}")
     
     return best_params, results_df
+
+
+# ============================================================================
+# TEMPORAL CLUSTERING
+# ============================================================================
+
+def extract_temporal_features(df: pd.DataFrame, datetime_col: str = "datetime_taken") -> pd.DataFrame:
+    """
+    Extract temporal features from datetime column for clustering.
+    
+    Features created:
+    - day_of_week: 0-6 (Monday-Sunday)
+    - month: 1-12
+    - season: 0-3 (Winter, Spring, Summer, Fall)
+    - quarter: 1-4 (Q1-Q4)
+    - day_of_year: 1-366
+    - week_of_year: 1-53
+    - is_weekend: 0 or 1
+    - hour_bucket: simplified hour of day (if available)
+    
+    Parameters:
+    -----------
+    df : DataFrame
+        Must contain datetime_col with datetime values
+    datetime_col : str
+        Name of datetime column
+    
+    Returns:
+    --------
+    df_features : DataFrame with temporal features
+    """
+    df = df.copy()
+    
+    if datetime_col not in df.columns:
+        raise ValueError(f"Column '{datetime_col}' not found")
+    
+    # Ensure datetime
+    df[datetime_col] = pd.to_datetime(df[datetime_col], errors='coerce')
+    
+    # Extract features
+    df['day_of_week'] = df[datetime_col].dt.dayofweek
+    df['month'] = df[datetime_col].dt.month
+    df['day_of_year'] = df[datetime_col].dt.dayofyear
+    df['week_of_year'] = df[datetime_col].dt.isocalendar().week
+    df['quarter'] = df[datetime_col].dt.quarter
+    df['is_weekend'] = (df[datetime_col].dt.dayofweek >= 5).astype(int)
+    
+    # Season: Winter(0), Spring(1), Summer(2), Fall(3)
+    month = df[datetime_col].dt.month
+    df['season'] = ((month - 1) // 3).astype(int)
+    
+    # Hour bucket (0-3): Night(0-5), Morning(6-11), Afternoon(12-17), Evening(18-23)
+    if df[datetime_col].dt.hour.notna().any():
+        hour = df[datetime_col].dt.hour
+        df['hour_bucket'] = pd.cut(hour, bins=[-1, 5, 11, 17, 23], labels=[0, 1, 2, 3]).astype(int)
+    else:
+        df['hour_bucket'] = 1  # Default to morning if no hour info
+    
+    return df
+
+
+def run_temporal_kmeans(
+    df: pd.DataFrame,
+    *,
+    datetime_col: str = "datetime_taken",
+    n_clusters: int = 6,
+    cluster_col: str = "temporal_cluster",
+    random_state: int = 42,
+    features: list = None,
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Run K-Means clustering on temporal features.
+    
+    Groups photos into temporal clusters based on when they were taken
+    (season, day of week, time patterns, etc.)
+    
+    Parameters:
+    -----------
+    datetime_col : str
+        Name of datetime column
+    n_clusters : int
+        Number of temporal clusters (default: 6 - suggests seasonal patterns)
+    cluster_col : str
+        Name of output cluster column
+    features : list
+        Which features to use for clustering.
+        Default: ['month', 'day_of_week', 'season', 'hour_bucket']
+        Other available: 'day_of_year', 'week_of_year', 'quarter', 'is_weekend'
+    
+    Returns:
+    --------
+    df_clustered : DataFrame with temporal cluster labels
+    report : dict with clustering metrics
+    """
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import silhouette_score
+    
+    if features is None:
+        features = ['month', 'day_of_week', 'season', 'hour_bucket']
+    
+    # Extract temporal features
+    df = extract_temporal_features(df, datetime_col=datetime_col)
+    
+    # Select features for clustering
+    X = df[features].fillna(0).values
+    
+    # Standardize features (important for K-Means)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Run K-Means
+    model = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10, max_iter=300)
+    labels = model.fit_predict(X_scaled)
+    
+    df[cluster_col] = labels.astype(int)
+    
+    # Calculate metrics
+    silhouette = float(silhouette_score(X_scaled, labels))
+    inertia = float(model.inertia_)
+    
+    # Cluster sizes
+    cluster_sizes = df[cluster_col].value_counts().sort_values(ascending=False)
+    cluster_sizes_top = [(int(cid), int(size)) for cid, size in cluster_sizes.items()]
+    
+    report = {
+        "algorithm": "Temporal K-Means",
+        "n_rows": len(df),
+        "n_clusters": n_clusters,
+        "features_used": features,
+        "inertia": inertia,
+        "silhouette_score": silhouette,
+        "cluster_sizes": cluster_sizes_top,
+    }
+    
+    print(f"[Temporal K-Means] Clusters: {n_clusters}, Silhouette: {silhouette:.3f}")
+    
+    return df, report
+
+
+def run_temporal_hdbscan(
+    df: pd.DataFrame,
+    *,
+    datetime_col: str = "datetime_taken",
+    min_cluster_size: int = 50,
+    min_samples: int = 30,
+    cluster_col: str = "temporal_cluster",
+    features: list = None,
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Run HDBSCAN clustering on temporal features.
+    
+    Better than K-Means for finding natural temporal groupings
+    without specifying cluster count in advance.
+    
+    Parameters:
+    -----------
+    datetime_col : str
+        Name of datetime column
+    min_cluster_size : int
+        Minimum number of points to form a cluster
+    min_samples : int
+        Conservativeness parameter
+    features : list
+        Which temporal features to use
+        Default: ['month', 'day_of_week', 'season', 'hour_bucket']
+    
+    Returns:
+    --------
+    df_clustered : DataFrame with temporal cluster labels (-1 = noise)
+    report : dict with clustering metrics
+    """
+    try:
+        import hdbscan
+    except ImportError:
+        raise ImportError("hdbscan not installed. Run: pip install hdbscan")
+    
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import silhouette_score
+    
+    if features is None:
+        features = ['month', 'day_of_week', 'season', 'hour_bucket']
+    
+    # Extract temporal features
+    df = extract_temporal_features(df, datetime_col=datetime_col)
+    
+    # Select features for clustering
+    X = df[features].fillna(0).values
+    
+    # Standardize features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Run HDBSCAN
+    model = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+    )
+    
+    labels = model.fit_predict(X_scaled)
+    df[cluster_col] = labels.astype(int)
+    
+    # Calculate metrics
+    noise_points = int((labels == -1).sum())
+    noise_ratio = float(noise_points / len(labels)) if len(labels) else 0.0
+    
+    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    
+    # Cluster sizes
+    cluster_sizes = df[df[cluster_col] != -1][cluster_col].value_counts().sort_values(ascending=False)
+    cluster_sizes_top = [(int(cid), int(size)) for cid, size in cluster_sizes.items()]
+    
+    # Metrics (exclude noise)
+    mask_no_noise = labels != -1
+    if mask_no_noise.sum() > 1 and n_clusters > 0:
+        silhouette = float(silhouette_score(X_scaled[mask_no_noise], labels[mask_no_noise]))
+    else:
+        silhouette = None
+    
+    report = {
+        "algorithm": "Temporal HDBSCAN",
+        "n_rows": len(df),
+        "n_clusters": n_clusters,
+        "noise_points": noise_points,
+        "noise_ratio": noise_ratio,
+        "features_used": features,
+        "silhouette_score": silhouette,
+        "cluster_sizes": cluster_sizes_top,
+    }
+    
+    print(f"[Temporal HDBSCAN] Clusters: {n_clusters}, Noise: {noise_ratio:.1%}, Silhouette: {silhouette}")
+    
+    return df, report
+
+
+def analyze_temporal_clusters(
+    df_clustered: pd.DataFrame,
+    *,
+    datetime_col: str = "datetime_taken",
+    cluster_col: str = "temporal_cluster",
+) -> pd.DataFrame:
+    """
+    Analyze and describe the temporal clusters.
+    
+    Returns a summary showing what each temporal cluster represents:
+    - Peak months
+    - Peak days of week
+    - Dominant season
+    - Activity patterns
+    
+    Parameters:
+    -----------
+    df_clustered : DataFrame
+        Result from run_temporal_kmeans or run_temporal_hdbscan
+    datetime_col : str
+        Name of datetime column
+    cluster_col : str
+        Name of cluster column
+    
+    Returns:
+    --------
+    summary_df : DataFrame with cluster descriptions
+    """
+    df = extract_temporal_features(df_clustered.copy(), datetime_col=datetime_col)
+    
+    # Map names for readable output
+    day_names = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu', 4: 'Fri', 5: 'Sat', 6: 'Sun'}
+    season_names = {0: 'Winter', 1: 'Spring', 2: 'Summer', 3: 'Fall'}
+    hour_names = {0: 'Night(0-5)', 1: 'Morning(6-11)', 2: 'Afternoon(12-17)', 3: 'Evening(18-23)'}
+    
+    # Exclude noise cluster
+    if -1 in df[cluster_col].values:
+        df_analysis = df[df[cluster_col] != -1].copy()
+    else:
+        df_analysis = df.copy()
+    
+    summaries = []
+    
+    for cid in sorted(df_analysis[cluster_col].unique()):
+        cluster_df = df_analysis[df_analysis[cluster_col] == cid]
+        
+        # Most common characteristics
+        peak_month = cluster_df['month'].mode()[0] if len(cluster_df['month'].mode()) > 0 else None
+        peak_day = cluster_df['day_of_week'].mode()[0] if len(cluster_df['day_of_week'].mode()) > 0 else None
+        peak_season = cluster_df['season'].mode()[0] if len(cluster_df['season'].mode()) > 0 else None
+        peak_hour = cluster_df['hour_bucket'].mode()[0] if len(cluster_df['hour_bucket'].mode()) > 0 else None
+        
+        # Calculate percentages
+        weekend_pct = 100 * cluster_df['is_weekend'].mean()
+        
+        summary_text = f"Cluster {cid}: "
+        
+        if peak_season is not None:
+            summary_text += f"{season_names[peak_season]} "
+        if peak_month is not None:
+            summary_text += f"(Month {peak_month}), "
+        if peak_day is not None:
+            summary_text += f"Peak {day_names[peak_day]}, "
+        if peak_hour is not None:
+            summary_text += f"{hour_names[peak_hour]}, "
+        
+        summary_text += f"{weekend_pct:.0f}% weekend"
+        
+        summaries.append({
+            "cluster_id": cid,
+            "size": len(cluster_df),
+            "peak_month": peak_month,
+            "peak_day": peak_day,
+            "peak_season": season_names.get(peak_season, 'Unknown'),
+            "peak_hour": hour_names.get(peak_hour, 'Unknown'),
+            "weekend_pct": weekend_pct,
+            "description": summary_text,
+        })
+    
+    summary_df = pd.DataFrame(summaries)
+    
+    return summary_df

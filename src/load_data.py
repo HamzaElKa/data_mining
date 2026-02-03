@@ -254,12 +254,12 @@ def print_report(report: DataReport, top_missing: int = 12) -> None:
     if report.taken_dt_success_rate is None:
         print("date_taken_* fields: N/A")
     else:
-        print(f"date_taken_* → datetime parse success:  {report.taken_dt_success_rate * 100:.2f}%")
+        print(f"date_taken_* -> datetime parse success:  {report.taken_dt_success_rate * 100:.2f}%")
 
     if report.upload_dt_success_rate is None:
         print("date_upload_* fields: N/A")
     else:
-        print(f"date_upload_* → datetime parse success: {report.upload_dt_success_rate * 100:.2f}%")
+        print(f"date_upload_* -> datetime parse success: {report.upload_dt_success_rate * 100:.2f}%")
 
     print("=" * 92 + "\n")
 

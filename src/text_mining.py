@@ -409,6 +409,136 @@ def create_wordcloud_for_cluster(
     return output_path
 
 
+def generate_cluster_title(keywords: List[str], max_words: int = 4) -> str:
+    """
+    Generate a POI name from top keywords.
+    
+    Parameters:
+    -----------
+    keywords : list of str
+        Top keywords for cluster
+    max_words : int
+        Maximum words in title
+    
+    Returns:
+    --------
+    str : Auto-generated POI name
+    """
+    if not keywords:
+        return "Unknown POI"
+    
+    # Take top N keywords, capitalize and join
+    title_words = [kw.capitalize() for kw in keywords[:max_words]]
+    return " & ".join(title_words)
+
+
+def extract_keywords_by_frequency(
+    df_clustered: pd.DataFrame,
+    *,
+    cluster_col: str = "cluster",
+    text_col: str = "text",
+    top_n: int = 10,
+) -> Dict[int, List[Tuple[str, int]]]:
+    """
+    Extract keywords by BM25 (Okapi BM25) scoring for each cluster.
+    
+    BM25 is more stable than raw frequency because it:
+    - Normalizes for document length
+    - Handles term saturation (diminishing returns for repeated terms)
+    - Is industry-standard in information retrieval
+    
+    Parameters:
+    -----------
+    top_n : int
+        Top N keywords per cluster
+    
+    Returns:
+    --------
+    Dict mapping cluster_id -> List[(keyword, bm25_score)]
+    """
+    try:
+        from rank_bm25 import BM25Okapi
+    except ImportError:
+        print("[WARN] rank_bm25 not installed. Run: pip install rank-bm25")
+        print("       Falling back to raw frequency...")
+        return _extract_keywords_by_raw_frequency(df_clustered, cluster_col, text_col, top_n)
+    
+    df = df_clustered[df_clustered[cluster_col] != -1].copy()
+    
+    if text_col not in df.columns:
+        df = preprocess_text(df, text_col=text_col)
+    
+    bm25_keywords = {}
+    
+    for cluster_id in df[cluster_col].unique():
+        cluster_texts = df[df[cluster_col] == cluster_id][text_col].tolist()
+        
+        # Tokenize documents
+        tokenized_docs = [text.split() for text in cluster_texts]
+        
+        if not tokenized_docs or not tokenized_docs[0]:
+            bm25_keywords[cluster_id] = []
+            continue
+        
+        # Initialize BM25
+        bm25 = BM25Okapi(tokenized_docs)
+        
+        # Get all unique words in this cluster
+        all_words = set()
+        for doc in tokenized_docs:
+            all_words.update(doc)
+        
+        # Score each word
+        word_scores = {}
+        for word in all_words:
+            # Query with single word, average score across documents
+            scores = bm25.get_scores([word])
+            avg_score = float(np.mean(scores))
+            word_scores[word] = avg_score
+        
+        # Get top N by BM25 score
+        top_keywords = sorted(word_scores.items(), key=lambda x: x[1], reverse=True)[:top_n]
+        bm25_keywords[cluster_id] = top_keywords
+    
+    return bm25_keywords
+
+
+def _extract_keywords_by_raw_frequency(
+    df_clustered: pd.DataFrame,
+    cluster_col: str = "cluster",
+    text_col: str = "text",
+    top_n: int = 10,
+) -> Dict[int, List[Tuple[str, int]]]:
+    """
+    Fallback: Extract keywords by raw frequency if BM25 not available.
+    """
+    from collections import Counter
+    
+    df = df_clustered[df_clustered[cluster_col] != -1].copy()
+    
+    if text_col not in df.columns:
+        df = preprocess_text(df, text_col=text_col)
+    
+    frequency_keywords = {}
+    
+    for cluster_id in df[cluster_col].unique():
+        cluster_texts = df[df[cluster_col] == cluster_id][text_col]
+        
+        # Split and count words
+        all_words = []
+        for text in cluster_texts:
+            all_words.extend(text.split())
+        
+        # Count frequencies
+        word_counts = Counter(all_words)
+        
+        # Get top N
+        top_keywords = word_counts.most_common(top_n)
+        frequency_keywords[cluster_id] = top_keywords
+    
+    return frequency_keywords
+
+
 def combine_cluster_names(
     tfidf_descriptions: List[ClusterDescription],
     frequency_keywords: Dict[int, List[Tuple[str, int]]],
@@ -603,3 +733,121 @@ if __name__ == "__main__":
         print(f"[ERROR] {e}")
         import traceback
         traceback.print_exc()
+
+
+# ============================================================================
+# BM25 KEYWORD EXTRACTION (Alternative to TF-IDF)
+# ============================================================================
+
+def extract_keywords_bm25(
+    df_clustered: pd.DataFrame,
+    *,
+    cluster_col: str = "cluster",
+    text_col: str = "text",
+    top_n_keywords: int = 10,
+) -> List[ClusterDescription]:
+    """
+    Extract keywords using BM25 algorithm.
+    
+    BM25 is better than TF-IDF because it:
+    - Normalizes by document length (longer texts don't dominate)
+    - Has saturation effect (word frequency plateaus)
+    - More stable with varying document sizes
+    
+    Parameters:
+    -----------
+    top_n_keywords : int
+        Number of top keywords to extract per cluster
+    
+    Returns:
+    --------
+    List of ClusterDescription objects
+    """
+    try:
+        from rank_bm25 import BM25Okapi
+    except ImportError:
+        raise ImportError("rank_bm25 not installed. Install with: pip install rank_bm25")
+    
+    # Filter out noise (-1)
+    df = df_clustered[df_clustered[cluster_col] != -1].copy()
+    
+    if text_col not in df.columns:
+        df = preprocess_text(df, text_col=text_col)
+    
+    # Group by cluster and tokenize texts
+    cluster_docs = {}
+    
+    for cluster_id in df[cluster_col].unique():
+        cluster_texts = df[df[cluster_col] == cluster_id][text_col].tolist()
+        
+        # Tokenize: split by spaces, already cleaned
+        tokenized_docs = [text.split() for text in cluster_texts]
+        
+        # Flatten all tokens for this cluster
+        all_tokens = []
+        for tokens in tokenized_docs:
+            all_tokens.extend(tokens)
+        
+        cluster_docs[cluster_id] = all_tokens
+    
+    cluster_ids = sorted(cluster_docs.keys())
+    
+    # Build BM25 model on all tokens from all clusters
+    all_cluster_tokens = [cluster_docs[cid] for cid in cluster_ids]
+    
+    bm25_model = BM25Okapi(all_cluster_tokens)
+    
+    # Get stop words
+    stop_words = get_stopwords(["french", "english"])
+    
+    descriptions = []
+    
+    for idx, cluster_id in enumerate(cluster_ids):
+        # Get all unique words in this cluster
+        unique_words = list(set(cluster_docs[cluster_id]))
+        
+        # Filter out stopwords and short words
+        unique_words = [
+            w for w in unique_words 
+            if w not in stop_words and len(w) >= 3
+        ]
+        
+        # Score each word using BM25
+        if unique_words:
+            # Create a "query" of all words in cluster
+            scores = []
+            for word in unique_words:
+                score = bm25_model.get_scores([word])[idx]
+                scores.append((word, score))
+            
+            # Sort by BM25 score
+            scores.sort(key=lambda x: x[1], reverse=True)
+            top_keywords = [word for word, _ in scores[:top_n_keywords]]
+            top_scores = [float(score) for _, score in scores[:top_n_keywords]]
+        else:
+            top_keywords = []
+            top_scores = []
+        
+        # Count photos in cluster
+        n_photos = int((df[cluster_col] == cluster_id).sum())
+        
+        # Generate POI title
+        cluster_title = generate_cluster_title(top_keywords, max_words=4)
+        
+        # Generate description
+        if top_keywords:
+            description = f"{cluster_title}: {', '.join(top_keywords[:3])}"
+        else:
+            description = f"Cluster {cluster_id}"
+        
+        descriptions.append(ClusterDescription(
+            cluster_id=int(cluster_id),
+            n_photos=n_photos,
+            top_keywords=top_keywords,
+            tfidf_scores=top_scores,
+            description=description,
+            cluster_title=cluster_title,
+        ))
+    
+    return descriptions
+
