@@ -1,8 +1,28 @@
 # 📸 Data Mining - Analyse Photos Lyon
 
+*This project mines 168k geotagged Flickr photos of Lyon, France to automatically discover tourist points of interest through spatial clustering (DBSCAN/K-Means/HDBSCAN) and text mining (TF-IDF). The result: 49 POIs detected and validated against Google Maps with 10/10 accuracy on the top clusters. Full write-up (in French) below.*
+
+---
+
 Projet Data Mining M2 - Analyse spatiale et textuelle de 168k photos Flickr de Lyon.
 
 **Mission** : Identifier les Points d'Intérêt (POI) touristiques pour aider Grand Lyon à améliorer les transports.
+
+---
+
+## 🖼️ Aperçu visuel
+
+**Carte interactive des clusters DBSCAN** (centre-ville de Lyon) :
+
+![Carte des clusters DBSCAN](docs/images/map_clusters_dbscan.png)
+
+*Carte interactive complète disponible dans [`src/outputs/map_clusters_dbscan.html`](src/outputs/map_clusters_dbscan.html) (zoom, popups par cluster).*
+
+**Wordclouds des 3 principaux POI détectés** (mots-clés TF-IDF) :
+
+| Musée des Beaux-Arts | Vieux Lyon | Place Bellecour |
+|---|---|---|
+| ![Wordcloud Musée des Beaux-Arts](docs/images/wordcloud_cluster_0_musee_beaux_arts.png) | ![Wordcloud Vieux Lyon](docs/images/wordcloud_cluster_1_vieux_lyon.png) | ![Wordcloud Place Bellecour](docs/images/wordcloud_cluster_2_bellecour.png) |
 
 ---
 

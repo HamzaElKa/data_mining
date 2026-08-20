@@ -162,7 +162,7 @@ def main() -> None:
     print("  - outputs/cluster_descriptions_bm25.csv")
     print("  - outputs/cluster_names_tfidf_bm25.csv")
     print("  - outputs/map_clusters_named_tfidf_bm25.html")
-    print("\nRead TEXT_MINING_COMPARISON.md for algorithm details!")
+    print("\nRead docs/TEXT_MINING_COMPARISON.md for algorithm details!")
     print("="*80 + "\n")
 
 

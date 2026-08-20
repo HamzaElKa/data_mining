@@ -248,7 +248,7 @@ def main() -> None:
     print("   - outputs/temporal_clusters_summary.csv")
     print("   - outputs/algorithm_comparison_main.csv")
     print("\n📄 Analysis:")
-    print("   - See CLUSTERING_ANALYSIS.md for detailed comparison")
+    print("   - See docs/CLUSTERING_ANALYSIS.md for detailed comparison")
     print()
 
 

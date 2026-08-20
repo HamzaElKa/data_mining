@@ -1,6 +1,15 @@
 
 .DS_Store
+**/.DS_Store
 __pycache__/
 *.pyc
 src/outputs/
 outputs/
+
+# Pipeline run logs
+pipeline.log
+pipeline_error.log
+pipeline_output.log
+
+# Raw dataset (too large for git, see docs/DATA.md)
+flickr_data2.csv
