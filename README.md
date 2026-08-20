@@ -317,14 +317,6 @@ stop_words = FR + EN + custom  # "lyon", "photo", "flickr"
 
 ---
 
-## 👥 Auteurs
-
-- **M2 Data Mining** - Université Lyon
-- **Client** : Grand Lyon (amélioration transports zones touristiques)
-- **Dataset** : 252k photos Flickr Lyon (2004-2014)
-
----
-
 ## 📅 Timeline
 
 - **Session 1** (Complétée) : Nettoyage + DBSCAN + Visualisation
@@ -332,13 +324,3 @@ stop_words = FR + EN + custom  # "lyon", "photo", "flickr"
 - **Session 3** (Future) : Association rules, NER, Validation ground truth
 
 ---
-
-## 📄 License
-
-Projet académique M2 - Usage éducatif uniquement.
-
-**Dataset Flickr** : Utilisation respectant Creative Commons (attribution requise).
-
----
-
-**Bon courage pour la présentation ! 🚀**
